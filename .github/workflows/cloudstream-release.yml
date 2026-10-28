@@ -20,6 +20,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Check Supabase configuration presence
+        env:
+          HAS_SUPABASE_URL: ${{ secrets.SUPABASE_URL != '' }}
+          HAS_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY != '' }}
+          HAS_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY != '' }}
+          HAS_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY != '' }}
+        run: |
+          echo "SUPABASE_URL present: $HAS_SUPABASE_URL"
+          echo "SUPABASE_PUBLISHABLE_KEY present: $HAS_SUPABASE_PUBLISHABLE_KEY"
+          echo "SUPABASE_ANON_KEY present: $HAS_SUPABASE_ANON_KEY"
+          echo "SUPABASE_SERVICE_ROLE_KEY present: $HAS_SUPABASE_SERVICE_ROLE_KEY (must never be used in the APK)"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
