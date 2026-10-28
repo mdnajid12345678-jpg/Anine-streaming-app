@@ -407,6 +407,13 @@
         app:popEnterAnim="@anim/enter_anim"
         app:popExitAnim="@anim/exit_anim" />
     <action
+        android:id="@+id/action_navigation_global_to_navigation_settings_import"
+        app:destination="@id/navigation_settings_import"
+        app:enterAnim="@anim/enter_anim"
+        app:exitAnim="@anim/exit_anim"
+        app:popEnterAnim="@anim/enter_anim"
+        app:popExitAnim="@anim/exit_anim" />
+    <action
         android:id="@+id/action_navigation_global_to_navigation_settings_extensions"
         app:destination="@id/navigation_settings_extensions"
         app:enterAnim="@anim/enter_anim"
@@ -688,6 +695,15 @@
         app:popEnterAnim="@anim/enter_anim"
         app:popExitAnim="@anim/exit_anim"
         tools:layout="@layout/fragment_setup_media" />
+
+    <fragment
+        android:id="@+id/navigation_settings_import"
+        android:name="com.lagradost.cloudstream3.ui.settings.imports.ImportFragment2"
+        android:label="@string/category_import"
+        app:enterAnim="@anim/enter_anim"
+        app:exitAnim="@anim/exit_anim"
+        app:popEnterAnim="@anim/enter_anim"
+        app:popExitAnim="@anim/exit_anim" />
 
     <activity
         android:id="@+id/accountSelectActivity"

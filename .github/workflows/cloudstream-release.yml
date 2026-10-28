@@ -36,10 +36,19 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Build Release APK
+      - name: Unit tests (import system and existing suites)
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assemblePrereleaseRelease
+          ./gradlew --no-daemon testPrereleaseDebugUnitTest
+
+      # Public build-time configuration. The Gradle build itself validates format and fails
+      # with a non-secret error if either value is missing; a service role key in the build
+      # environment aborts the build entirely (app/build.gradle.kts).
+      - name: Build Release APK
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: ./gradlew --no-daemon assemblePrereleaseRelease
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v7
@@ -47,4 +56,13 @@ jobs:
           name: cloudstream-release-apk
           path: app/build/outputs/apk/prerelease/release/*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
           retention-days: 14

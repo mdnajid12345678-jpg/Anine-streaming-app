@@ -814,4 +814,54 @@
     </plurals>
     <string name="player_is_live">Live</string>
     <string name="installed_plugins">Installed plugins</string>
+
+    <!-- Native Import system (Settings -> Import) -->
+    <string name="category_import">Import</string>
+    <string name="import_provider_group">Providers</string>
+    <string name="import_provider_count">%1$d providers available in this app</string>
+    <string name="import_select_providers">Select providers</string>
+    <string name="import_no_provider_selected">No provider selected</string>
+    <string name="import_scan_group">Scan configuration</string>
+    <string name="import_categories">Content categories</string>
+    <string name="import_year_from">From year</string>
+    <string name="import_year_to">To year</string>
+    <string name="import_max_items">Item limit per run</string>
+    <string name="import_max_pages">Catalog page limit</string>
+    <string name="import_search_queries">Search seeds, comma separated</string>
+    <string name="import_resolve_links">Resolve playable links</string>
+    <string name="import_resolve_links_summary">Calls the provider loadLinks() and extractors. Slower, and not every provider supports it.</string>
+    <string name="import_max_episodes">Episode limit per series</string>
+    <string name="import_run_group">Run</string>
+    <string name="import_start_scan">Start preview scan</string>
+    <string name="import_cancel">Cancel</string>
+    <string name="import_upload_enabled">Upload to Supabase</string>
+    <string name="import_upload_enabled_summary">Writes through the import-sync Edge Function only after you confirm the preview.</string>
+    <string name="import_daily_enabled">Daily import</string>
+    <string name="import_daily_enabled_summary">Runs the same scan once a day through WorkManager, subject to Android background limits.</string>
+    <string name="import_edge_key">Edge function caller key</string>
+    <string name="import_edge_key_summary">Device key for the import-sync function. Stored only on this device, never in the APK build.</string>
+    <string name="import_preview_group">Preview</string>
+    <string name="import_preview_empty">No preview yet. Start a scan. Nothing is written to the database until you confirm.</string>
+    <string name="import_preview_summary">%1$d canonical titles ready</string>
+    <string name="import_preview_more">…and %1$d more</string>
+    <string name="import_confirm">Import to database</string>
+    <string name="import_uploading">Uploading…</string>
+    <string name="import_dismiss">Dismiss</string>
+    <string name="import_report_counts">Loaded %1$d · errors %2$d · warnings %3$d</string>
+    <string name="import_report_show">Show failures and warnings</string>
+    <string name="import_report_hide">Hide details</string>
+    <string name="import_report_clean">No failures, warnings or review flags</string>
+    <string name="import_upload_failed">Upload failed: %1$s</string>
+    <string name="import_job_id">Import job %1$s</string>
+    <string name="import_supabase_ready">Supabase public configuration is present in this build</string>
+    <string name="import_supabase_missing">Supabase public configuration is missing in this build, uploads are disabled</string>
+    <string name="import_phase_idle">Idle</string>
+    <string name="import_phase_discovering">Scanning catalogs…</string>
+    <string name="import_phase_loading">Loading detail pages…</string>
+    <string name="import_phase_resolving">Resolving links…</string>
+    <string name="import_phase_writing">Writing…</string>
+    <string name="import_phase_preview">Preview ready</string>
+    <string name="import_phase_done">Done</string>
+    <string name="import_phase_cancelled">Cancelled</string>
+    <string name="import_phase_failed">Failed</string>
 </resources>

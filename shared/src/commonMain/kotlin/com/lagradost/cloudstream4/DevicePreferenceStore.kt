@@ -30,6 +30,42 @@ class AppSettings internal constructor(
     val updates = UpdatePreferences(preferences)
     val backup = BackupPreferences(preferences)
     val plugins = PluginPreferences(preferences)
+    val importer = ImportPreferences(preferences)
+}
+
+/**
+ * Settings for the native Import system (Settings -> Import).
+ *
+ * Only safe, non secret scan preferences are stored here. Supabase publishes
+ * configuration at build time and the user supplied import key is stored only on device;
+ * no service role credential is ever part of the app.
+ */
+class ImportPreferences(preferences: PreferenceStore) {
+    /** Provider names as reported by MainAPI.name. */
+    val providers = preferences.getStringSet("import_provider_names")
+    /** ImportCategory names. */
+    val categories = preferences.getStringSet("import_categories")
+    /** Raw year text; empty means "no bound". Validated by ImportConfig.validate(). */
+    val yearFrom = preferences.getString("import_year_from", "")
+    val yearTo = preferences.getString("import_year_to", "")
+    val maxItems = preferences.getInt("import_max_items", 60)
+    val maxPages = preferences.getInt("import_max_pages", 3)
+    /** When false the engine never calls loadLinks(). */
+    val resolveLinks = preferences.getBoolean("import_resolve_links", false)
+    val maxEpisodesPerSeries = preferences.getInt("import_max_episodes", 12)
+    /** Comma separated keyword seeds used with MainAPI.search(). */
+    val searchQueries = preferences.getString("import_search_queries", "")
+    /** Upload finished runs to Supabase through the Edge Function. */
+    val uploadEnabled = preferences.getBoolean("import_upload_enabled", true)
+    /** Daily WorkManager import. */
+    val dailyImportEnabled = preferences.getBoolean("import_daily_enabled", false)
+    /** Unix ms of the last completed run, real data only. */
+    val lastRunAt = preferences.getLong("import_last_run_at", 0L)
+    /**
+     * Caller key for the Supabase Edge Function. Entered by the user on device,
+     * never shipped inside the APK and never a Supabase service role key.
+     */
+    val edgeFunctionKey = preferences.getString("import_edge_function_key", "")
 }
 
 class PluginPreferences(preferences: PreferenceStore) {

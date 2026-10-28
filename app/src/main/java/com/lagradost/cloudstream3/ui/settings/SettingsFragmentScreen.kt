@@ -2,6 +2,7 @@ package com.lagradost.cloudstream3.ui.settings
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import com.lagradost.cloudstream3.ui.settings.imports.ImportScreen
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
@@ -159,6 +160,17 @@ object SettingsFragmentScreen : Screen {
             subtitle = persistentListOf(
                 R.string.pref_category_accounts,
                 R.string.pref_category_security
+            )
+        ),
+        SettingsNavigation(
+            title = R.string.category_import,
+            navigation = R.id.action_navigation_global_to_navigation_settings_import,
+            screen = ImportScreen,
+            icon = R.drawable.baseline_sync_24,
+            subtitle = persistentListOf(
+                R.string.import_provider_group,
+                R.string.import_scan_group,
+                R.string.import_preview_group,
             )
         ),
         SettingsNavigation(

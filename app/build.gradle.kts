@@ -1,4 +1,7 @@
 import com.android.build.gradle.internal.cxx.configure.gradleLocalProperties
+import org.gradle.api.GradleException
+import org.gradle.api.tasks.Optional
+import java.util.Base64
 import org.jetbrains.dokka.gradle.engine.parameters.KotlinPlatform
 import org.jetbrains.dokka.gradle.engine.parameters.VisibilityModifier
 import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
@@ -17,11 +20,15 @@ val javaTarget = JvmTarget.fromTarget(libs.versions.jvmTarget.get())
 
 abstract class GenerateGitHashTask : DefaultTask() {
 
+    // Optional: a linked git worktree stores .git as a file, and some checkouts have no refs
+    // directory at all. The task action degrades to an empty hash instead of failing the build.
     @get:InputFile
+    @get:Optional
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val headFile: RegularFileProperty
 
     @get:InputDirectory
+    @get:Optional
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val headsDir: DirectoryProperty
 
@@ -30,16 +37,18 @@ abstract class GenerateGitHashTask : DefaultTask() {
 
     @TaskAction
     fun generate() {
-        val head = headFile.get().asFile
-
         val hash = try {
-            if (head.exists()) {
+            val head = headFile.orNull?.asFile
+            val heads = headsDir.orNull?.asFile
+            if (head != null && head.exists()) {
                 // Read the commit hash from .git/HEAD
                 val headContent = head.readText().trim()
                 if (headContent.startsWith("ref:")) {
-                    val refPath = headContent.substring(5) // e.g., refs/heads/main
-                    val commitFile = File(head.parentFile, refPath)
-                    if (commitFile.exists()) commitFile.readText().trim() else ""
+                    val refPath = headContent.substring(5).trim() // e.g., refs/heads/main
+                    val candidates = listOf(File(head.parentFile, refPath)) +
+                        (heads?.let { File(it, refPath.removePrefix("refs/heads/")) }?.let { listOf(it) }
+                            ?: emptyList())
+                    candidates.firstOrNull { it.exists() }?.readText()?.trim() ?: ""
                 } else headContent // If it's a detached HEAD (commit hash directly)
             } else "" // If .git/HEAD doesn't exist
         } catch (_: Throwable) {
@@ -52,14 +61,126 @@ abstract class GenerateGitHashTask : DefaultTask() {
     }
 }
 
-val generateGitHash = tasks.register<GenerateGitHashTask>("generateGitHash") {
-    val gitDir = layout.projectDirectory.dir("../.git")
+/**
+ * Resolves the git directory for both layouts: a plain checkout where .git is a directory and
+ * a linked worktree where .git is a file containing "gitdir: <path>" (shared refs live in the
+ * commondir of that git directory).
+ */
+fun resolveGitDirs(dotGit: File): Pair<File, File> {
+    val gitDir = when {
+        dotGit.isDirectory -> dotGit
+        dotGit.isFile -> {
+            val target = dotGit.readText().trim().removePrefix("gitdir:").trim()
+            val parsed = File(target)
+            if (parsed.isAbsolute) parsed else File(dotGit.parentFile, target)
+        }
+        else -> return dotGit to dotGit
+    }
+    if (!gitDir.isDirectory) return dotGit to dotGit
 
-    headFile.set(gitDir.file("HEAD"))
-    headsDir.set(gitDir.dir("refs/heads"))
+    val commonFile = File(gitDir, "commondir")
+    val commonDir = if (commonFile.isFile) {
+        val target = commonFile.readText().trim()
+        val parsed = File(target)
+        if (parsed.isAbsolute) parsed else File(gitDir, target)
+    } else gitDir
+    return gitDir to commonDir
+}
+
+val generateGitHash = tasks.register<GenerateGitHashTask>("generateGitHash") {
+    val dotGit = rootProject.layout.projectDirectory.file(".git").asFile
+    val (gitDir, commonDir) = resolveGitDirs(dotGit)
+
+    val head = File(gitDir, "HEAD")
+    if (head.exists()) headFile.set(head)
+    val heads = File(commonDir, "refs/heads")
+    if (heads.isDirectory) headsDir.set(heads)
 
     outputDir.set(layout.buildDirectory.dir("generated/git"))
 }
+
+// ---------------------------------------------------------------------------------------------
+// Supabase public runtime configuration.
+//
+// Injected at build time from the CI environment (GitHub Actions secrets). Only PUBLIC values
+// belong here: the project URL and the publishable/anon key. The database is protected by RLS
+// plus an Edge Function, so the client never needs a service role key. The presence of a secret
+// key in the build environment fails the build outright; missing public config fails the release
+// build with a clear, non-secret error while still letting debug builds and unit tests compile.
+//
+// Note: System.getenv is used on purpose so no value is captured in the configuration cache.
+// ---------------------------------------------------------------------------------------------
+
+fun supabaseJwtRole(token: String): String? {
+    val parts = token.split('.')
+    if (parts.size != 3) return null
+    return try {
+        val segment = parts[1].replace('-', '+').replace('_', '/')
+        val padded = segment + "=".repeat((4 - segment.length % 4) % 4)
+        val decoded = String(Base64.getDecoder().decode(padded))
+        Regex("\"role\"\\s*:\\s*\"([^\"]+)\"").find(decoded)?.groupValues?.get(1)
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+val supabaseUrlEnv = System.getenv("SUPABASE_URL")?.trim().orEmpty()
+val supabaseKeyEnv = System.getenv("SUPABASE_PUBLISHABLE_KEY")?.trim().orEmpty()
+
+/** True when a requested task will produce a signed/releasable artifact. */
+fun isReleaseAssemblyRequested(): Boolean {
+    val names = gradle.startParameter.taskNames.map { it.substringAfterLast(':') }
+    return names.any { name ->
+        val producing =
+            name.startsWith("assemble") || name.startsWith("bundle") ||
+                name.startsWith("package") || name.startsWith("install") ||
+                name.startsWith("minify")
+        producing && name.contains("Release") && !name.endsWith("Debug")
+    }
+}
+
+// Problems that must fail every build: a secret would otherwise end up in the APK.
+val supabaseSecretProblems = buildList {
+    if (!System.getenv("SUPABASE_SERVICE_ROLE_KEY").isNullOrBlank()) {
+        add("SUPABASE_SERVICE_ROLE_KEY is present in the build environment; service role keys must never reach the APK")
+    }
+    if (supabaseKeyEnv.startsWith("sb_secret_")) {
+        add("SUPABASE_PUBLISHABLE_KEY starts with sb_secret_, which is a secret key; provide the publishable key only")
+    }
+    if (supabaseJwtRole(supabaseKeyEnv) == "service_role") {
+        add("SUPABASE_PUBLISHABLE_KEY decodes to role=service_role; provide the publishable/anon key only")
+    }
+    if (supabaseKeyEnv.any { it.isWhitespace() }) {
+        add("SUPABASE_PUBLISHABLE_KEY contains whitespace")
+    }
+}
+if (supabaseSecretProblems.isNotEmpty()) {
+    throw GradleException(
+        "Refusing to build: " + supabaseSecretProblems.joinToString("\n - ", prefix = "\n - ") +
+            "\nOnly SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY may be supplied to this build.",
+    )
+}
+
+// Problems about missing public configuration: fatal for release builds only.
+val supabaseMissingProblems = buildList {
+    if (supabaseUrlEnv.isEmpty()) add("SUPABASE_URL is missing")
+    else if (!supabaseUrlEnv.startsWith("https://")) add("SUPABASE_URL must be an https URL")
+    if (supabaseKeyEnv.isEmpty()) add("SUPABASE_PUBLISHABLE_KEY is missing")
+}
+if (supabaseMissingProblems.isNotEmpty()) {
+    val message = "Supabase release configuration is incomplete:\n - " +
+        supabaseMissingProblems.joinToString("\n - ") +
+        "\nSet the public values under Settings -> Secrets -> SUPABASE_URL and " +
+        "SUPABASE_PUBLISHABLE_KEY. No secret key is required or permitted here."
+    if (isReleaseAssemblyRequested()) throw GradleException(message)
+    logger.warn("Supabase not configured, continuing with an unconfigured build: " +
+        supabaseMissingProblems.joinToString("; "))
+}
+
+val supabaseUrl = supabaseUrlEnv
+val supabasePublishableKey = supabaseKeyEnv
+val supabaseFunctionUrl =
+    if (supabaseUrl.isEmpty()) "" else "${supabaseUrl.trimEnd('/')}/functions/v1/import-sync"
 
 android {
     @Suppress("UnstableApiUsage")
@@ -138,6 +259,16 @@ android {
             "String",
             "ANILIST_KEY",
             "\"" + (System.getenv("ANILIST_KEY") ?: localProperties["anilist.key"]) + "\""
+        )
+
+        // Public Supabase runtime configuration (never a service role key).
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"$supabasePublishableKey\"")
+        buildConfigField("String", "SUPABASE_IMPORT_FUNCTION_URL", "\"$supabaseFunctionUrl\"")
+        buildConfigField(
+            "boolean",
+            "SUPABASE_CONFIGURED",
+            (supabaseUrl.isNotEmpty() && supabasePublishableKey.isNotEmpty()).toString()
         )
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -218,6 +349,7 @@ dependencies {
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.core)
     androidTestImplementation(libs.espresso.core)
     androidTestImplementation(libs.ext.junit)
