@@ -41,6 +41,45 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon testPrereleaseDebugUnitTest
 
+      # The uploaded APK must be signed or Android refuses to install it. Uses the repository
+      # keystore secrets when they are configured; otherwise signs with a throwaway key generated
+      # on the runner so the artifact installs, at the cost of not being an upgrade path to a
+      # production key. Passwords are written straight to GITHUB_ENV and are never echoed.
+      - name: Prepare Android signing
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/upload-keystore.jks"
+            {
+              echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/upload-keystore.jks"
+              echo "SIGNING_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+              echo "SIGNING_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+              echo "SIGNING_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            } >> "$GITHUB_ENV"
+            mode="repository keystore (stable signature)"
+            echo "keystore=repository-keystore" >> "$GITHUB_OUTPUT"
+          else
+            keytool -genkeypair -keystore "$RUNNER_TEMP/ci-keystore.jks" -storepass android \
+              -keypass android -alias cikey -keyalg RSA -keysize 2048 -validity 1 \
+              -dname "CN=CloudStream CI, OU=CI, O=CI, L=NA, S=NA, C=US" >/dev/null 2>&1
+            {
+              echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/ci-keystore.jks"
+              echo "SIGNING_STORE_PASSWORD=android"
+              echo "SIGNING_KEY_ALIAS=cikey"
+              echo "SIGNING_KEY_PASSWORD=android"
+            } >> "$GITHUB_ENV"
+            mode="throwaway CI key (installable, but switching to a real key needs one reinstall)"
+            echo "keystore=ephemeral" >> "$GITHUB_OUTPUT"
+          fi
+          echo "### APK signing" >> "$GITHUB_STEP_SUMMARY"
+          echo "- $mode" >> "$GITHUB_STEP_SUMMARY"
+
       # Public build-time configuration. The Gradle build itself validates format and fails
       # with a non-secret error if either value is missing; a service role key in the build
       # environment aborts the build entirely (app/build.gradle.kts).
@@ -49,6 +88,15 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: ./gradlew --no-daemon assemblePrereleaseRelease
+
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk/prerelease/release -name '*.apk' | head -n 1)
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          echo "checking $apk"
+          "$bt/apksigner" verify "$apk"
+          echo "signature OK"
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v7

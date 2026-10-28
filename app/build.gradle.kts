@@ -210,8 +210,15 @@ android {
         // so won't kill the configuration cache.
         if (System.getenv("SIGNING_KEY_ALIAS") != null) {
             create("prerelease") {
-                val tmpFilePath = System.getProperty("user.home") + "/work/_temp/keystore/"
-                val prereleaseStoreFile: File? = File(tmpFilePath).listFiles()?.first()
+                // CI exports SIGNING_KEYSTORE_FILE explicitly; fall back to the legacy path that
+                // upstream's own workflow unpacks its keystore into.
+                val explicitPath = System.getenv("SIGNING_KEYSTORE_FILE")
+                val prereleaseStoreFile: File? = if (!explicitPath.isNullOrBlank()) {
+                    File(explicitPath).takeIf { it.isFile }
+                } else {
+                    File(System.getProperty("user.home") + "/work/_temp/keystore/")
+                        .listFiles()?.firstOrNull()
+                }
 
                 storeFile = prereleaseStoreFile?.let { file(it) }
                 storePassword = System.getenv("SIGNING_STORE_PASSWORD")
