@@ -1,0 +1,78 @@
+name: Bootstrap CloudStream and build Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudstream-release
+  cancel-in-progress: false
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          path: target
+
+      - name: Checkout upstream CloudStream source
+        uses: actions/checkout@v4
+        with:
+          repository: recloudstream/cloudstream
+          ref: main
+          fetch-depth: 1
+          path: upstream
+
+      - name: Sync upstream source into this repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/workflows/cloudstream-release.yml' \
+            upstream/ target/
+          cd target
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync upstream CloudStream source [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "Upstream source is already synchronized."
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Release APK
+        working-directory: target
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assemblePrereleaseRelease
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudstream-release-apk
+          path: target/app/build/outputs/apk/prerelease/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
