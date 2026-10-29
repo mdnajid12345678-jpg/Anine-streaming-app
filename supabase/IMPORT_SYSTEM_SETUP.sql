@@ -8,8 +8,7 @@
 --
 --       supabase/migrations/20261028_cloudstream_import.sql
 --
---   Run THAT file first. It is idempotent: running it twice changes nothing. It creates only
---   new objects (no existing table is dropped, renamed or altered).
+--   Run THAT file first. It is idempotent: running it twice changes nothing.
 --
 -- ---------------------------------------------------------------------------------------
 -- STEP 1 — run the migration (you, manually)
@@ -20,7 +19,13 @@
 --   3. Press Run. Expected result: "Success. No rows returned".
 --
 --   The migration is not executed by this repository, by CI, or by the Android app. It only
---   ever runs when you paste it yourself.
+--   ever runs when you paste it yourself (or when it is applied through the Supabase
+--   Management API as part of an explicit deploy request).
+--
+--   One caveat: if an earlier prototype table named public.media_sources already exists with
+--   the OLD shape, the migration renames it to media_sources_legacy_backup_20261025 (guarded,
+--   data kept, nothing dropped) so the identically named new table can be created. Every other
+--   object in the migration is brand new; no existing table is dropped or altered.
 --
 -- ---------------------------------------------------------------------------------------
 -- STEP 2 — what the migration creates

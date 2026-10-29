@@ -5,7 +5,10 @@
 -- How to run: paste into the Supabase SQL Editor of your project and press Run.
 --             Nothing here drops, truncates or alters an existing unrelated table.
 -- Safety:     every object is created with IF NOT EXISTS / CREATE OR REPLACE, so re-running
---             the file is safe.
+--             the file is safe. The only pre-existing object this file touches is a legacy
+--             prototype table colliding with the name media_sources, which is renamed to
+--             media_sources_legacy_backup_20261025 (rows kept, nothing dropped) by the
+--             guarded preflight block below.
 --
 -- Security model
 --   * RLS is enabled on every table created here.
@@ -21,6 +24,34 @@
 -- =============================================================================================
 
 begin;
+
+-- ---------------------------------------------------------------------------------------------
+-- Preflight: move a legacy prototype table aside (never delete it)
+--
+-- An earlier schema iteration in this project already created a table named public.media_sources
+-- with a DIFFERENT shape (no dedup_key column). Because of `create table if not exists` below,
+-- that table would silently satisfy the name while the unique index on dedup_key then failed the
+-- whole transaction. We rename the legacy table to a backup name instead: it keeps every row,
+-- constraint, policy and its foreign key to media_items. Nothing is dropped or truncated.
+-- Re-running is safe: once our own media_sources (with dedup_key) exists, this block does nothing.
+-- The renamed table is public.media_sources_legacy_backup_20261025.
+-- ---------------------------------------------------------------------------------------------
+do $$
+begin
+    if exists (
+            select 1 from information_schema.tables
+             where table_schema = 'public' and table_name = 'media_sources'
+        )
+        and not exists (
+            select 1 from information_schema.columns
+             where table_schema = 'public' and table_name = 'media_sources'
+               and column_name = 'dedup_key'
+        ) then
+        alter table public.media_sources
+            rename to media_sources_legacy_backup_20261025;
+    end if;
+end;
+$$;
 
 -- gen_random_uuid() ships with pgcrypto, which Supabase already enables.
 create extension if not exists pgcrypto;
