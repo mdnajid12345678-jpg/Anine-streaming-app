@@ -835,7 +835,7 @@
     <string name="import_start_scan">Start preview scan</string>
     <string name="import_cancel">Cancel</string>
     <string name="import_upload_enabled">Upload to Supabase</string>
-    <string name="import_upload_enabled_summary">Writes through the import-sync Edge Function only after you confirm the preview.</string>
+    <string name="import_upload_enabled_summary">Saves every finished scan through the import-sync Edge Function automatically, so a long scan is never lost. You can still re-upload from the preview.</string>
     <string name="import_daily_enabled">Daily import</string>
     <string name="import_daily_enabled_summary">Runs the same scan once a day through WorkManager, subject to Android background limits.</string>
     <string name="import_edge_key">Edge function caller key</string>

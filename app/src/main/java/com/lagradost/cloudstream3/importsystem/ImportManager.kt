@@ -127,6 +127,20 @@ object ImportManager {
                         uploadMessage = null,
                     )
                 }
+
+                // Auto-save: a scan the user explicitly started is written to Supabase as soon
+                // as it finishes, so a long scan is never lost to a missed button press. It
+                // still honours the "Upload to Supabase" preference; with it off the preview
+                // waits for the manual "Import to database" button exactly as before.
+                val completed = result.progress.phase == ImportPhase.PREVIEW_READY ||
+                    result.progress.phase == ImportPhase.DONE
+                if (config.uploadToSupabase &&
+                    BuildConfig.SUPABASE_CONFIGURED &&
+                    completed &&
+                    result.contents.isNotEmpty()
+                ) {
+                    uploadPreview(settings)
+                }
             } catch (t: Throwable) {
                 _state.update { current ->
                     val cancelled = current.progress.phase == ImportPhase.CANCELLED
@@ -171,7 +185,28 @@ object ImportManager {
         val preview = snapshot.preview
         if (preview.isEmpty() || snapshot.uploading) return
 
-        _state.update { it.copy(uploading = true, uploadMessage = null) }
+        val callerKey = settings.importer.edgeFunctionKey.get().trim()
+        if (callerKey.isEmpty()) {
+            // Honest state: nothing was written, and exactly what is missing is said.
+            _state.update {
+                it.copy(
+                    uploadMessage = "Scan kept on screen, but nothing was saved yet: set the " +
+                        "edge function caller key, then tap \"Import to database\"",
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(
+                uploading = true,
+                uploadMessage = null,
+                progress = it.progress.copy(
+                    phase = ImportPhase.WRITING,
+                    message = "Saving ${preview.size} titles to Supabase",
+                ),
+            )
+        }
 
         scope.launch {
             val configResult = configFromSettings(settings)
@@ -239,7 +274,7 @@ object ImportManager {
             val client = SupabaseImportClient(
                 functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
                 publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
-                callerKey = settings.importer.edgeFunctionKey.get(),
+                callerKey = callerKey,
             )
 
             try {
@@ -267,6 +302,10 @@ object ImportManager {
                             jobId = jobId,
                             uploadError = null,
                         ),
+                        progress = it.progress.copy(
+                            phase = ImportPhase.DONE,
+                            message = null,
+                        ),
                     )
                 }
             } catch (t: Throwable) {
@@ -278,6 +317,11 @@ object ImportManager {
                             uploaded = false,
                             jobId = jobId,
                             uploadError = t.message,
+                        ),
+                        // Back to the preview so the manual button can retry after a failure.
+                        progress = it.progress.copy(
+                            phase = ImportPhase.PREVIEW_READY,
+                            message = null,
                         ),
                     )
                 }
