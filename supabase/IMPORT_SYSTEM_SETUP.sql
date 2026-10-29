@@ -52,7 +52,10 @@
 --     media_sources             provider/extractor/server records. media_url is only stored
 --                               when status = 'resolved', which can only come from the real
 --                               loadLinks() path. resolved rows must carry a media url,
---                               unresolved rows must not.
+--                               unresolved rows must not. headers jsonb holds the Referer /
+--                               User-Agent the extractor itself used (migration
+--                               20261029_source_headers.sql), so a player can repeat the
+--                               exact request instead of being blocked by hotlink checks.
 --     import_jobs               one row per import run (id is the client generated uuid).
 --     import_item_errors        per-item failures, de-duplicated per job.
 --     import_duplicate_candidates  ambiguous titles kept for manual review, never auto merged.

@@ -93,6 +93,17 @@ const stripUndefined = (o: Record<string, unknown>): Record<string, unknown> =>
 
 function mapSource(s: Record<string, unknown>): Record<string, unknown> {
   const status = typeof s.status === "string" && STATUSES.has(s.status) ? s.status : "unresolved";
+  // Request headers the extractor used (referer, user-agent, ...): only plain string pairs,
+  // capped so a client cannot smuggle a large blob through the source list.
+  const rawHeaders = s.headers && typeof s.headers === "object" && !Array.isArray(s.headers)
+    ? Object.entries(s.headers as Record<string, unknown>)
+        .filter(([k, v]) =>
+          typeof k === "string" && k.length > 0 && k.length <= 128 &&
+          typeof v === "string" && v.length > 0 && v.length <= 1024,
+        )
+        .slice(0, 24)
+    : [];
+  const headers = rawHeaders.length > 0 ? Object.fromEntries(rawHeaders) : undefined;
   return stripUndefined({
     provider_id: str(s.providerId),
     detail_url: str(s.detailUrl),
@@ -107,6 +118,7 @@ function mapSource(s: Record<string, unknown>): Record<string, unknown> {
     expires_at: iso(s.expiresAt),
     status,
     error: str(s.error),
+    headers,
   });
 }
 

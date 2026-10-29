@@ -120,6 +120,7 @@ select m.title,
 select s.status,
        count(*)                                        as rows_count,
        count(*) filter (where s.media_url is not null) as with_media_url,
+       count(*) filter (where s.headers <> '{}'::jsonb) as with_request_headers,
        min(s.resolved_at)                              as oldest_resolution,
        max(s.resolved_at)                              as newest_resolution
   from public.media_sources s

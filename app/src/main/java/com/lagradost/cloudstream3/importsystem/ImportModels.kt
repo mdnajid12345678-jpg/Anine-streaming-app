@@ -202,6 +202,13 @@ data class ImportEpisodeSource(
     val resolvedAt: Long? = null,
     val status: String = "unresolved",
     val error: String? = null,
+    /**
+     * Request headers the extractor itself used (referer, user-agent, ...), copied verbatim
+     * from the real ExtractorLink so a player can repeat the exact request instead of
+     * guessing and being blocked by the CDN's hotlink protection. Empty when the link was
+     * never resolved.
+     */
+    val headers: Map<String, String> = emptyMap(),
 )
 
 @Serializable

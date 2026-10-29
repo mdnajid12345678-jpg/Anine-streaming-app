@@ -681,6 +681,8 @@ class ImportEngine(
         val url: String,
         val quality: Int,
         val type: String,
+        val referer: String,
+        val headers: Map<String, String>,
     )
 
     private fun com.lagradost.cloudstream3.utils.ExtractorLink.toResolved() = ResolvedLink(
@@ -689,6 +691,8 @@ class ImportEngine(
         url = url,
         quality = quality,
         type = type.name,
+        referer = referer,
+        headers = headers,
     )
 
     private fun ResolvedLink.toSource(providerId: String, resolvedAt: Long) = ImportEpisodeSource(
@@ -701,7 +705,23 @@ class ImportEngine(
         isResolved = true,
         resolvedAt = resolvedAt,
         status = "resolved",
+        headers = requestHeaders(),
     )
+
+    /**
+     * The exact request the extractor made, so a downstream player does not have to guess:
+     * the extractor's own headers win, and its referer is added when it did not set one.
+     */
+    private fun ResolvedLink.requestHeaders(): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        headers.forEach { (key, value) ->
+            if (key.isNotBlank() && value.isNotBlank()) out[key] = value
+        }
+        if (referer.isNotBlank() && out.keys.none { it.equals("referer", ignoreCase = true) }) {
+            out["Referer"] = referer
+        }
+        return out
+    }
 
     companion object {
         fun contentTypeName(type: TvType): String = when (type) {
