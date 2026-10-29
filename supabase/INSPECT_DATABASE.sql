@@ -14,8 +14,10 @@
 
 -- 1. Which tables exist in the public schema, and how many rows each holds
 -- ------------------------------------------------------------------------------------------
--- expected: the 9 import tables below (plus the two legacy tables kept for history).
---           Right after setup every count is 0; they grow after the first import.
+-- expected: exactly the 9 import tables below. Older prototype tables (media_items and the
+--           renamed old media_sources) were dropped on 2026-10-29 at the project owner's
+--           request after being verified empty. Right after setup every count is 0; they
+--           grow after the first import.
 select t.table_name,
        (xpath('/row/cnt/text(),
                query_to_xml(format(
@@ -160,11 +162,11 @@ select name, version
 
 
 -- =============================================================================================
--- What the legacy tables are
+-- Schema history note
 -- =============================================================================================
---   public.media_items                        older prototype table (kept, untouched)
---   public.media_sources_legacy_backup_20261025
---                                             the old media_sources, renamed aside by the
---                                             migration so the new schema could be created.
---                                             Nothing was ever dropped or truncated.
+--   This database briefly also contained two prototype tables from an earlier iteration:
+--     public.media_items
+--     public.media_sources_legacy_backup_20261025 (the old media_sources, renamed aside)
+--   Both were verified empty and dropped on 2026-10-29 at the project owner's request.
+--   Only the 9 import tables above remain; no data was ever deleted.
 -- =============================================================================================

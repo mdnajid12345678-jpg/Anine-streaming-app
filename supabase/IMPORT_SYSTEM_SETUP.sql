@@ -26,6 +26,10 @@
 --   the OLD shape, the migration renames it to media_sources_legacy_backup_20261025 (guarded,
 --   data kept, nothing dropped) so the identically named new table can be created. Every other
 --   object in the migration is brand new; no existing table is dropped or altered.
+--   In this project both prototype tables (media_items and that renamed backup) were verified
+--   empty and then dropped at the owner's request on 2026-10-29, so only the 9 tables above
+--   exist here. The guarded rename stays in the file so the migration remains safe to run
+--   against a project that still has the old table.
 --
 -- ---------------------------------------------------------------------------------------
 -- STEP 2 — what the migration creates
