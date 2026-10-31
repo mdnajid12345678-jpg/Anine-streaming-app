@@ -78,7 +78,7 @@ object ImportManager {
     fun supabaseConfigured(): Boolean = BuildConfig.SUPABASE_CONFIGURED
 
     fun startPreview(config: ImportConfig, settings: AppSettings) {
-        if (job?.isActive == true) return
+        if (job?.isActive == true || ProviderLinkRefreshManager.state.value.running) return
 
         val validationError = config.validate()
         if (validationError != null) {
@@ -111,32 +111,16 @@ object ImportManager {
             val started = nowMs()
             try {
                 val callerKey = settings.importer.edgeFunctionKey.get().trim()
-                val initialWarnings = mutableListOf<String>()
-                val existingTitles = if (BuildConfig.SUPABASE_CONFIGURED && callerKey.isNotEmpty()) {
-                    try {
-                        SupabaseImportClient(
-                            functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
-                            publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
-                            callerKey = callerKey,
-                        ).existingProviderTitles(config.providerNames)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (t: Throwable) {
-                        initialWarnings += "Could not check previously imported titles; this scan " +
-                            "may include items already saved: ${t.message ?: "lookup failed"}"
-                        emptyMap()
-                    }
-                } else {
-                    initialWarnings += "Previously imported titles could not be checked because " +
-                        "the Supabase URL/publishable key or Edge Function caller key is missing"
-                    emptyMap()
-                }
+                val existingTitles = SupabaseImportClient(
+                    functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
+                    publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
+                    callerKey = callerKey,
+                ).existingProviderTitles(config.providerNames)
 
                 val engine = ImportEngine(
                     config = config,
                     providers = providers,
                     existingProviderTitles = existingTitles,
-                    initialWarnings = initialWarnings,
                     emit = { progress -> _state.update { it.copy(progress = progress) } },
                 )
                 val result = withContext(Dispatchers.IO) { engine.run() }

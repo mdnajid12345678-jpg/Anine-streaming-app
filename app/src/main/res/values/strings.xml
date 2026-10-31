@@ -838,6 +838,14 @@
     <string name="import_run_group">Run</string>
     <string name="import_start_scan">Start preview scan</string>
     <string name="import_cancel">Cancel</string>
+    <string name="import_new_link">New Link</string>
+    <string name="import_new_link_title">Refresh playable links</string>
+    <string name="import_new_link_description">Choose a provider. Only content already saved for that provider is checked. New playable links replace that provider’s old links; titles and other providers are not changed.</string>
+    <string name="import_new_link_choose_provider">Select provider</string>
+    <string name="import_new_link_refresh">Refresh links</string>
+    <string name="import_new_link_cancel">Cancel refresh</string>
+    <string name="import_no_provider_selected">No installed providers are available.</string>
+    <string name="import_new_link_progress">Saved items %1$d/%2$d · playable links %3$d · refreshed titles %4$d · episodes %5$d · failures %6$d</string>
     <string name="import_upload_enabled">Upload to Supabase</string>
     <string name="import_upload_enabled_summary">Saves every finished scan through the import-sync Edge Function automatically, so a long scan is never lost. You can still re-upload from the preview.</string>
     <string name="import_daily_enabled">Daily import</string>

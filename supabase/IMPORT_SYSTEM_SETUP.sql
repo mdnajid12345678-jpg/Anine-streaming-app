@@ -7,6 +7,8 @@
 --   The schema itself lives in the canonical migration:
 --
 --       supabase/migrations/20261028_cloudstream_import.sql
+--       supabase/migrations/20261029_source_headers.sql
+--       supabase/migrations/20261031_provider_link_refresh.sql
 --
 --   Run THAT file first. It is idempotent: running it twice changes nothing.
 --
@@ -14,13 +16,11 @@
 -- STEP 1 — run the migration (you, manually)
 -- ---------------------------------------------------------------------------------------
 --   1. Open your Supabase project -> SQL Editor.
---   2. Create a new query, paste the full contents of
---      supabase/migrations/20261028_cloudstream_import.sql
---   3. Press Run. Expected result: "Success. No rows returned".
+--   2. Run the three migration files above in date order, each in its own query.
+--   3. Expected result for each: "Success. No rows returned".
 --
---   The migration is not executed by this repository, by CI, or by the Android app. It only
---   ever runs when you paste it yourself (or when it is applied through the Supabase
---   Management API as part of an explicit deploy request).
+--   Migrations are not executed by this repository, by CI, or by the Android app. They only
+--   run when you apply them in Supabase (or through the Supabase Management API).
 --
 --   One caveat: if an earlier prototype table named public.media_sources already exists with
 --   the OLD shape, the migration renames it to media_sources_legacy_backup_20261025 (guarded,
@@ -66,6 +66,8 @@
 --                                                  the Edge Function.
 --     import_sync_source_upsert(content, episode,  single source upsert with upgrade rules.
 --                               source)
+--     import_sync_replace_provider_links(provider,  transactionally replaces only that
+--                               contents)           provider's refreshed playable links.
 --     Both are SECURITY DEFINER, EXECUTE is revoked from anon/authenticated/public and
 --     granted only to service_role.
 --
@@ -79,6 +81,10 @@
 --
 --     supabase functions deploy import-sync
 --     supabase secrets set IMPORT_CALLER_KEY="<a long random value you generate>"
+--
+--   The deployed function also handles provider_link_refresh_targets and replace_provider_links.
+--   Deploy this updated source after applying the migrations; New Link cannot work against an
+--   older deployed function.
 --
 --   Function secrets (server side only):
 --     SUPABASE_SERVICE_ROLE_KEY  provided by Supabase automatically

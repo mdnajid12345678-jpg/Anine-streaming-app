@@ -169,4 +169,106 @@ class ImportSupabaseClientTest {
         assertFalse(json.contains("serviceRole"))
         assertFalse(json.contains("SUPABASE"))
     }
+
+    @Test
+    fun `provider link refresh request and response survive json round trips`() {
+        val targetRequest = ProviderLinkRefreshTargetsRequest(
+            action = "provider_link_refresh_targets",
+            providerId = "ProviderA",
+            offset = 200,
+        )
+        val requestJson = targetRequest.toJson()
+        assertTrue(requestJson.contains("provider_link_refresh_targets"))
+        assertEquals(targetRequest, tryParseJson<ProviderLinkRefreshTargetsRequest>(requestJson))
+
+        val targetResponse = ProviderLinkRefreshTargetsResponse(
+            targets = listOf(
+                ProviderLinkRefreshTarget(
+                    contentId = "11111111-2222-3333-4444-555555555555",
+                    title = "Naruto",
+                    normalizedTitle = "naruto",
+                    releaseYear = 2002,
+                    contentType = "anime_series",
+                    detailUrl = "https://a.example/naruto",
+                ),
+            ),
+            nextOffset = 1,
+            hasMore = false,
+        )
+        assertEquals(
+            targetResponse,
+            tryParseJson<ProviderLinkRefreshTargetsResponse>(targetResponse.toJson()),
+        )
+    }
+
+    @Test
+    fun `link replacement contains only source data and its result parses`() {
+        val request = ReplaceProviderLinksRequest(
+            action = "replace_provider_links",
+            providerId = "ProviderA",
+            contents = listOf(
+                ProviderLinkRefreshContent(
+                    contentId = "11111111-2222-3333-4444-555555555555",
+                    episodes = listOf(
+                        ProviderLinkRefreshEpisode(
+                            seasonNumber = 1,
+                            episodeNumber = 2,
+                            title = "Episode 2",
+                            linkData = "episode-data",
+                            sources = listOf(
+                                ImportEpisodeSource(
+                                    providerId = "ProviderA",
+                                    mediaUrl = "https://cdn.example/new.m3u8",
+                                    isResolved = true,
+                                    status = "resolved",
+                                    headers = mapOf("Referer" to "https://a.example/"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val json = request.toJson()
+        assertTrue(json.contains("replace_provider_links"))
+        assertTrue(json.contains("https://cdn.example/new.m3u8"))
+        assertFalse(json.contains("canonicalKey"))
+        assertEquals(request, tryParseJson<ReplaceProviderLinksRequest>(json))
+
+        val result = ReplaceProviderLinksResult(
+            replacedContents = 1,
+            replacedEpisodes = 1,
+            replacedSources = 1,
+            unmatchedEpisodes = 0,
+        )
+        assertEquals(result, tryParseJson<ReplaceProviderLinksResult>(result.toJson()))
+    }
+
+    @Test
+    fun `New Link endpoints reject missing caller key before network access`() = runBlocking {
+        val client = SupabaseImportClient(
+            functionUrl = "https://project.example/functions/v1/import-sync",
+            publishableKey = "sb_publishable_test",
+            callerKey = "",
+        )
+
+        val lookupError = runCatching {
+            client.providerLinkRefreshTargets("ProviderA", offset = 0)
+        }.exceptionOrNull()
+        val replacementError = runCatching {
+            client.replaceProviderLinks(
+                providerId = "ProviderA",
+                contents = listOf(
+                    ProviderLinkRefreshContent(
+                        contentId = "11111111-2222-3333-4444-555555555555",
+                    ),
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(lookupError is ImportUploadException)
+        assertTrue(lookupError!!.message!!.contains("caller key"))
+        assertTrue(replacementError is ImportUploadException)
+        assertTrue(replacementError!!.message!!.contains("caller key"))
+    }
 }

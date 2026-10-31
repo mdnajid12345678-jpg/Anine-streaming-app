@@ -325,3 +325,61 @@ data class ExistingProviderTitlesRequest(
     val action: String,
     val providerIds: List<String>,
 )
+
+@Serializable
+data class ProviderLinkRefreshTarget(
+    val contentId: String,
+    val title: String,
+    val normalizedTitle: String,
+    val releaseYear: Int? = null,
+    val contentType: String,
+    val detailUrl: String,
+)
+
+@Serializable
+data class ProviderLinkRefreshTargetsRequest(
+    val action: String,
+    val providerId: String,
+    val offset: Int,
+    val limit: Int = 200,
+)
+
+@Serializable
+data class ProviderLinkRefreshTargetsResponse(
+    val targets: List<ProviderLinkRefreshTarget> = emptyList(),
+    val nextOffset: Int = 0,
+    val hasMore: Boolean = false,
+)
+
+/** One database episode identity and its newly resolved playable sources. */
+@Serializable
+data class ProviderLinkRefreshEpisode(
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val title: String? = null,
+    val linkData: String? = null,
+    val sources: List<ImportEpisodeSource>,
+)
+
+/** Only source data is sent; this operation never changes content metadata or creates titles. */
+@Serializable
+data class ProviderLinkRefreshContent(
+    val contentId: String,
+    val sources: List<ImportEpisodeSource> = emptyList(),
+    val episodes: List<ProviderLinkRefreshEpisode> = emptyList(),
+)
+
+@Serializable
+data class ReplaceProviderLinksRequest(
+    val action: String,
+    val providerId: String,
+    val contents: List<ProviderLinkRefreshContent>,
+)
+
+@Serializable
+data class ReplaceProviderLinksResult(
+    val replacedContents: Int = 0,
+    val replacedEpisodes: Int = 0,
+    val replacedSources: Int = 0,
+    val unmatchedEpisodes: Int = 0,
+)

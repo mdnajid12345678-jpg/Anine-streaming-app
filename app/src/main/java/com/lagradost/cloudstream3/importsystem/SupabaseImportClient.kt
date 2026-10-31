@@ -92,6 +92,80 @@ class SupabaseImportClient(
         throw ImportUploadException(lastError ?: "Existing-title lookup failed without a reason")
     }
 
+    /** Loads a page of already-saved content/provider URLs; it never returns unrelated titles. */
+    suspend fun providerLinkRefreshTargets(
+        providerId: String,
+        offset: Int,
+        limit: Int = LINK_REFRESH_PAGE_SIZE,
+    ): ProviderLinkRefreshTargetsResponse = postAction(
+        request = ProviderLinkRefreshTargetsRequest(
+            action = "provider_link_refresh_targets",
+            providerId = providerId,
+            offset = offset,
+            limit = limit,
+        ),
+        parse = { text -> tryParseJson<ProviderLinkRefreshTargetsResponse>(text) },
+        operation = "provider link target lookup",
+    )
+
+    /** Replaces this provider's stored sources only where the client found fresh playable links. */
+    suspend fun replaceProviderLinks(
+        providerId: String,
+        contents: List<ProviderLinkRefreshContent>,
+    ): ReplaceProviderLinksResult = postAction(
+        request = ReplaceProviderLinksRequest(
+            action = "replace_provider_links",
+            providerId = providerId,
+            contents = contents,
+        ),
+        parse = { text -> tryParseJson<ReplaceProviderLinksResult>(text) },
+        operation = "provider link replacement",
+    )
+
+    private suspend fun <T> postAction(
+        request: Any,
+        parse: (String) -> T?,
+        operation: String,
+    ): T {
+        val config = configuration()
+        if (!config.configured) {
+            throw ImportUploadException(config.reason ?: "Supabase is not configured")
+        }
+        if (callerKey.isBlank()) {
+            throw ImportUploadException("Import Edge Function caller key is not configured")
+        }
+        val body = request.toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
+        var lastError: String? = null
+        repeat(MAX_ATTEMPTS) { attempt ->
+            try {
+                val response = app.post(
+                    functionUrl,
+                    headers = requestHeaders(),
+                    requestBody = body,
+                )
+                val text = response.text
+                if (response.code !in 200..299) {
+                    lastError = "Function responded with HTTP ${response.code}: ${snippet(text)}"
+                    if (response.code in 400..499 && response.code != 429) {
+                        throw ImportUploadException(lastError!!)
+                    }
+                } else {
+                    return parse(text) ?: throw ImportUploadException(
+                        "Function returned an invalid $operation response: ${snippet(text)}",
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ImportUploadException) {
+                throw e
+            } catch (t: Throwable) {
+                lastError = t.message?.take(300) ?: t::class.simpleName
+            }
+            if (attempt < MAX_ATTEMPTS - 1) delay(RETRY_DELAY_MS * (attempt + 1))
+        }
+        throw ImportUploadException(lastError ?: "$operation failed without a reason")
+    }
+
     /**
      * Uploads one finished preview. Throws with an accurate message when the function is not
      * configured, rejects the caller, or the network fails; it never fabricates success.
@@ -158,6 +232,7 @@ class SupabaseImportClient(
     companion object {
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_DELAY_MS = 1_500L
+        const val LINK_REFRESH_PAGE_SIZE = 200
     }
 }
 

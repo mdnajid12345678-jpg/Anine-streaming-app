@@ -231,6 +231,30 @@ class ImportEngineTest {
         }
 
     @Test
+    fun `known titles on the same page do not spend the limit for new titles`() = runBlocking {
+        val provider = FakeProvider().apply {
+            searchResponseByPage = mapOf(
+                1 to listOf(
+                    searchItem(TITLE, "/anime/known-1"),
+                    searchItem(" ${TITLE.uppercase()}! ", "/anime/known-2"),
+                    searchItem(NEW_TITLE, "/anime/new"),
+                ),
+            )
+        }
+        val result = ImportEngine(
+            config = config().copy(maxItems = 1),
+            providers = listOf(provider),
+            existingProviderTitles = mapOf(
+                "FakeProvider" to setOf(TitleNormalizer.normalize(TITLE)),
+            ),
+        ).run()
+
+        assertEquals(listOf(NEW_TITLE), result.contents.values.map { it.title })
+        assertEquals(1, provider.loadCalls)
+        assertEquals(2, result.progress.duplicatesSkipped)
+    }
+
+    @Test
     fun `same title from another provider merges provider references without removing the first`() =
         runBlocking {
             val first = FakeProvider().apply {

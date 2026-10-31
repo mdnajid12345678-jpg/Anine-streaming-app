@@ -5,11 +5,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,7 +25,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -33,6 +41,7 @@ import com.lagradost.cloudstream3.importsystem.ImportPhase
 import com.lagradost.cloudstream3.importsystem.ImportProgress
 import com.lagradost.cloudstream3.importsystem.ImportReport
 import com.lagradost.cloudstream3.importsystem.ImportConfig
+import com.lagradost.cloudstream3.importsystem.ProviderLinkRefreshManager
 import com.lagradost.cloudstream4.AppSettings
 import com.lagradost.cloudstream4.rememberAppSettings
 import com.mihon.presentation.settings.Preference
@@ -59,6 +68,7 @@ object ImportScreen : SearchableSettings {
     override fun getPreferences(): List<Preference> {
         val settings = rememberAppSettings()
         val state by ImportManager.state.collectAsState()
+        val linkRefreshState by ProviderLinkRefreshManager.state.collectAsState()
         val context = LocalContext.current
 
         val providers = ImportEngine.installedProviders()
@@ -168,7 +178,7 @@ object ImportScreen : SearchableSettings {
                 preferenceItems = persistentListOf(
                     Preference.PreferenceItem.CustomPreference(
                         title = stringResource(R.string.import_run_group),
-                        content = { RunPanel(state, settings) },
+                        content = { RunPanel(state, linkRefreshState, settings, providers) },
                     ),
                     Preference.PreferenceItem.SwitchPreference(
                         title = stringResource(R.string.import_upload_enabled),
@@ -273,7 +283,15 @@ object ImportScreen : SearchableSettings {
     }
 
     @Composable
-    private fun RunPanel(state: ImportManager.State, settings: AppSettings) {
+    private fun RunPanel(
+        state: ImportManager.State,
+        linkState: ProviderLinkRefreshManager.State,
+        settings: AppSettings,
+        providers: List<com.lagradost.cloudstream3.MainAPI>,
+    ) {
+        var showProviderPicker by remember { mutableStateOf(false) }
+        var selectedProvider by remember { mutableStateOf(providers.firstOrNull()?.name) }
+
         Column(
             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -301,7 +319,7 @@ object ImportScreen : SearchableSettings {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    enabled = !state.running,
+                    enabled = !state.running && !state.uploading && !linkState.running,
                     onClick = {
                             val (config, error) = ImportManager.configFromSettings(settings)
                             if (error != null) {
@@ -314,11 +332,51 @@ object ImportScreen : SearchableSettings {
                     Text(stringResource(R.string.import_start_scan))
                 }
                 OutlinedButton(
+                    enabled = !state.running && !state.uploading && !linkState.running,
+                    onClick = {
+                        selectedProvider = providers.firstOrNull()?.name
+                        showProviderPicker = true
+                    },
+                ) {
+                    Text(stringResource(R.string.import_new_link))
+                }
+                OutlinedButton(
                     enabled = state.running,
                     onClick = { ImportManager.cancel() },
                 ) {
                     Text(stringResource(R.string.import_cancel))
                 }
+                if (linkState.running) {
+                    OutlinedButton(onClick = { ProviderLinkRefreshManager.cancel() }) {
+                        Text(stringResource(R.string.import_new_link_cancel))
+                    }
+                }
+            }
+
+            if (linkState.running) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            if (linkState.totalTargets > 0) {
+                Text(
+                    text = stringResource(
+                        R.string.import_new_link_progress,
+                        linkState.completedTargets,
+                        linkState.totalTargets,
+                        linkState.linksResolved,
+                        linkState.replacedContents,
+                        linkState.replacedEpisodes,
+                        linkState.failedTargets + linkState.unmatchedEpisodes,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            linkState.message?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             val supabaseReady = ImportManager.supabaseConfigured()
@@ -329,6 +387,63 @@ object ImportScreen : SearchableSettings {
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        if (showProviderPicker) {
+            AlertDialog(
+                onDismissRequest = { showProviderPicker = false },
+                title = { Text(stringResource(R.string.import_new_link_title)) },
+                text = {
+                    Column {
+                        Text(
+                            text = stringResource(R.string.import_new_link_description),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (providers.isEmpty()) {
+                            Text(
+                                text = stringResource(R.string.import_no_provider_selected),
+                                modifier = Modifier.padding(top = 12.dp),
+                            )
+                        } else {
+                            LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                                items(providers, key = { it.name }) { provider ->
+                                    val selected = provider.name == selectedProvider
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .selectable(
+                                                selected = selected,
+                                                role = Role.RadioButton,
+                                                onClick = { selectedProvider = provider.name },
+                                            )
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        RadioButton(selected = selected, onClick = null)
+                                        Text("${provider.name} · ${provider.lang}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = selectedProvider != null && providers.isNotEmpty(),
+                        onClick = {
+                            selectedProvider?.let { ProviderLinkRefreshManager.start(it, settings) }
+                            showProviderPicker = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.import_new_link_refresh))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showProviderPicker = false }) {
+                        Text(stringResource(R.string.cancel))
+                    }
+                },
             )
         }
     }

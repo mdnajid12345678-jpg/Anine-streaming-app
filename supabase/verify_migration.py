@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Local verification of supabase/migrations/20261028_cloudstream_import.sql.
+"""Local verification of the import-system Supabase migrations.
 
-Runs the migration twice (idempotency), checks that anon/authenticated are refused,
-and exercises the privileged import_sync_upsert() path with a realistic payload.
+Runs every migration twice (idempotency), checks client roles are refused, and exercises both
+the import upsert and selected-provider playable-link replacement paths.
 """
 import json
 import sys
@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pg8000.native
 
-MIGRATION = Path(__file__).with_name("migrations") / "20261028_cloudstream_import.sql"
+MIGRATIONS = [
+    Path(__file__).with_name("migrations") / "20261028_cloudstream_import.sql",
+    Path(__file__).with_name("migrations") / "20261029_source_headers.sql",
+    Path(__file__).with_name("migrations") / "20261031_provider_link_refresh.sql",
+]
 CONN = dict(host="127.0.0.1", port=5433, user="postgres", database="postgres")
 
 failures = []
@@ -23,8 +27,8 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
-def scalar(con, sql):
-    rows = con.run(sql)
+def scalar(con, sql, **params):
+    rows = con.run(sql, **params)
     return rows[0][0] if rows and rows[0] else None
 
 
@@ -33,6 +37,16 @@ def upsert(con, payload):
     rows = con.run(
         "select public.import_sync_upsert(:payload::jsonb)",
         payload=json.dumps(payload),
+    )
+    value = rows[0][0]
+    return value if isinstance(value, dict) else json.loads(str(value))
+
+
+def replace_links(con, provider_id, contents):
+    rows = con.run(
+        "select public.import_sync_replace_provider_links(:provider_id, :contents::jsonb)",
+        provider_id=provider_id,
+        contents=json.dumps(contents),
     )
     value = rows[0][0]
     return value if isinstance(value, dict) else json.loads(str(value))
@@ -47,7 +61,7 @@ def expect_error(con, name, sql, *args):
 
 
 def main():
-    sql = MIGRATION.read_text()
+    migrations = [(path.name, path.read_text()) for path in MIGRATIONS]
 
     con = pg8000.native.Connection(**CONN)
     con.run("set client_min_messages to warning;")
@@ -71,13 +85,15 @@ def main():
     )
     con.run("grant usage on schema public to anon, authenticated, service_role;")
 
-    print("--- running migration (1st time) ---")
-    con.run(sql)
-    check("migration runs without error", True)
+    for name, sql in migrations:
+        print(f"--- running {name} (1st time) ---")
+        con.run(sql)
+        check(f"{name} runs without error", True)
 
-    print("--- running migration again (idempotency) ---")
-    con.run(sql)
-    check("migration re-runs without error", True)
+    for name, sql in migrations:
+        print(f"--- running {name} again (idempotency) ---")
+        con.run(sql)
+        check(f"{name} re-runs without error", True)
 
     tables = [
         r[0]
@@ -123,6 +139,11 @@ def main():
         "anon call of import_sync_upsert is rejected",
         "select public.import_sync_upsert('{}'::jsonb)",
     )
+    expect_error(
+        con,
+        "anon call of provider link replacement is rejected",
+        "select public.import_sync_replace_provider_links('ProviderA', '[]'::jsonb)",
+    )
     con.run("reset role;")
 
     con.run("set role authenticated;")
@@ -132,6 +153,13 @@ def main():
         "insert into public.import_jobs (id) values (gen_random_uuid())",
     )
     con.run("reset role;")
+
+    # Keep the verifier repeatable when run against a persistent local database.
+    con.run(
+        "truncate table public.import_duplicate_candidates, public.import_item_errors, "
+        "public.import_jobs, public.media_sources, public.episodes, public.seasons, "
+        "public.provider_contents, public.media_contents, public.import_providers cascade"
+    )
 
     # ---------------------------------------------------------------- privileged upsert
     payload = {
@@ -291,6 +319,101 @@ def main():
     )
     check("exactly one resolved link with a media url", resolved_urls == 1, str(resolved_urls))
     check("no unresolved row carries a media url", unresolved_with_url == 0, str(unresolved_with_url))
+
+    # ------------------------------------------------ provider-specific link replacement
+    content_id = scalar(
+        con,
+        "select id::text from public.media_contents where canonical_key='series|naruto|2002'",
+    )
+    episode_id = scalar(
+        con,
+        "select id::text from public.episodes where content_id=(select id from public.media_contents "
+        "where canonical_key='series|naruto|2002') and episode_number=1",
+    )
+    svc.run(
+        "insert into public.import_providers (provider_id, display_name) values ('ProviderB', 'Provider B') "
+        "on conflict (provider_id) do nothing"
+    )
+    svc.run(
+        "insert into public.provider_contents (content_id, provider_id, detail_url) "
+        "values (:content_id::uuid, 'ProviderB', 'https://b.example/naruto') "
+        "on conflict (content_id, provider_id, detail_url) do nothing",
+        content_id=content_id,
+    )
+    svc.run("set role service_role;")
+    svc.run(
+        "select public.import_sync_source_upsert(:content_id::uuid, :episode_id::uuid, :source::jsonb)",
+        content_id=content_id,
+        episode_id=episode_id,
+        source=json.dumps({
+            "provider_id": "ProviderB",
+            "extractor_name": "OtherExtractor",
+            "server_name": "Other server",
+            "media_url": "https://other.example/keep.m3u8",
+            "is_resolved": True,
+            "status": "resolved",
+            "resolved_at": "2026-10-28T10:06:00Z",
+        }),
+    )
+    refresh = replace_links(
+        svc,
+        "ProviderA",
+        [{
+            "content_id": content_id,
+            "sources": [],
+            "episodes": [{
+                "season_number": 1,
+                "episode_number": 1,
+                "title": "Enter Naruto",
+                "sources": [{
+                    "provider_id": "ProviderA",
+                    "extractor_name": "FreshExtractor",
+                    "server_name": "Fresh server",
+                    "media_url": "https://cdn.example/fresh.m3u8",
+                    "is_resolved": True,
+                    "status": "resolved",
+                    "resolved_at": "2026-10-31T10:00:00Z",
+                    "headers": {"Referer": "https://a.example/watch"},
+                }],
+            }],
+        }],
+    )
+    svc.run("reset role;")
+    check("provider link replacement reports one episode/source", refresh.get("replaced_episodes") == 1 and refresh.get("replaced_sources") == 1, str(refresh))
+    provider_a_urls = [
+        row[0]
+        for row in con.run(
+            "select media_url from public.media_sources where provider_id='ProviderA' and episode_id=:episode_id::uuid",
+            episode_id=episode_id,
+        )
+    ]
+    provider_b_urls = [
+        row[0]
+        for row in con.run(
+            "select media_url from public.media_sources where provider_id='ProviderB' and episode_id=:episode_id::uuid",
+            episode_id=episode_id,
+        )
+    ]
+    headers = scalar(
+        con,
+        "select headers from public.media_sources where provider_id='ProviderA' and episode_id=:episode_id::uuid",
+        episode_id=episode_id,
+    )
+    check("fresh provider link replaced old resolved and failed rows", provider_a_urls == ["https://cdn.example/fresh.m3u8"], str(provider_a_urls))
+    check("another provider's playable link is untouched", provider_b_urls == ["https://other.example/keep.m3u8"], str(provider_b_urls))
+    check("fresh extractor headers are persisted", headers == {"Referer": "https://a.example/watch"}, str(headers))
+
+    svc.run("set role service_role;")
+    empty_refresh = replace_links(
+        svc,
+        "ProviderA",
+        [{"content_id": content_id, "sources": [], "episodes": []}],
+    )
+    svc.run("reset role;")
+    check("empty refresh leaves saved provider link intact", empty_refresh.get("replaced_sources") == 0 and scalar(
+        con,
+        "select count(*) from public.media_sources where provider_id='ProviderA' and media_url='https://cdn.example/fresh.m3u8'",
+    ) == 1, str(empty_refresh))
 
     order_ok = con.run(
         "select episode_number from public.episodes where dedup_key like 'n:%' order by sort_order"

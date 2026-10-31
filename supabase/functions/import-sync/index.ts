@@ -20,6 +20,8 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_CONTENTS = 500;
 const MAX_PROVIDERS = 100;
 const MAX_EXISTING_TITLE_ROWS = 50_000;
+const MAX_LINK_REFRESH_PAGE_SIZE = 200;
+const MAX_LINK_REFRESH_BATCH_CONTENTS = 50;
 const MAX_ITEM_ERRORS = 500;
 const MAX_SOURCES_PER_EPISODE = 50;
 const CONTENT_TYPES = new Set([
@@ -120,6 +122,39 @@ function mapSource(s: Record<string, unknown>): Record<string, unknown> {
     status,
     error: str(s.error),
     headers,
+  });
+}
+
+function mapResolvedRefreshSource(
+  source: Record<string, unknown>,
+  providerId: string,
+): Record<string, unknown> | null {
+  const mapped = mapSource({ ...source, providerId });
+  return mapped.status === "resolved" && mapped.is_resolved === true &&
+      typeof mapped.media_url === "string"
+    ? mapped
+    : null;
+}
+
+function mapRefreshEpisode(
+  episode: Record<string, unknown>,
+  providerId: string,
+): Record<string, unknown> | null {
+  const sources = Array.isArray(episode.sources)
+    ? (episode.sources as unknown[])
+      .filter((source): source is Record<string, unknown> =>
+        !!source && typeof source === "object" && !Array.isArray(source))
+      .slice(0, MAX_SOURCES_PER_EPISODE)
+      .map((source) => mapResolvedRefreshSource(source, providerId))
+      .filter((source): source is Record<string, unknown> => source !== null)
+    : [];
+  if (sources.length === 0) return null;
+  return stripUndefined({
+    season_number: num(episode.seasonNumber),
+    episode_number: num(episode.episodeNumber),
+    title: str(episode.title),
+    link_data: str(episode.linkData),
+    sources,
   });
 }
 
@@ -366,6 +401,129 @@ Deno.serve(async (req) => {
       existingProviderTitles: Object.fromEntries(
         Object.entries(titlesByProvider).map(([provider, titles]) => [provider, [...titles]]),
       ),
+    });
+  }
+
+  if (body.action === "provider_link_refresh_targets") {
+    const providerId = str(body.providerId)?.trim();
+    const offset = Number(body.offset ?? 0);
+    const limit = Number(body.limit ?? MAX_LINK_REFRESH_PAGE_SIZE);
+    if (!providerId || providerId.length > 200 || !Number.isInteger(offset) || offset < 0 ||
+      offset >= MAX_EXISTING_TITLE_ROWS || !Number.isInteger(limit) || limit < 1 ||
+      limit > MAX_LINK_REFRESH_PAGE_SIZE) {
+      return json(400, { error: "providerId, offset and limit are invalid" });
+    }
+
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    if (!serviceRoleKey || !supabaseUrl) {
+      return json(503, { error: "server side Supabase secrets are not configured for this project" });
+    }
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data, error } = await admin
+      .from("provider_contents")
+      .select("content_id, detail_url, last_seen_at, media_contents!inner(title, normalized_title, release_year, content_type)")
+      .eq("provider_id", providerId)
+      .order("content_id", { ascending: true })
+      .order("last_seen_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) {
+      console.error("provider link target lookup failed:", error.code ?? "unknown");
+      return json(422, { error: "database rejected the provider link target lookup" });
+    }
+
+    const targets = (data ?? []).flatMap((row) => {
+      const relation = row.media_contents as unknown;
+      const content = Array.isArray(relation) ? relation[0] : relation;
+      if (!content || typeof content !== "object") return [];
+      const fields = content as Record<string, unknown>;
+      const title = str(fields.title);
+      const normalizedTitle = str(fields.normalized_title);
+      const detailUrl = str(row.detail_url);
+      const contentId = str(row.content_id);
+      const contentType = str(fields.content_type);
+      if (!title || !normalizedTitle || !detailUrl || !contentId || !contentType) return [];
+      return [stripUndefined({
+        contentId,
+        title,
+        normalizedTitle,
+        releaseYear: num(fields.release_year),
+        contentType,
+        detailUrl,
+      })];
+    });
+    const nextOffset = offset + (data?.length ?? 0);
+    if (nextOffset >= MAX_EXISTING_TITLE_ROWS && (data?.length ?? 0) === limit) {
+      return json(413, { error: "too many saved provider records to refresh safely" });
+    }
+    return json(200, {
+      targets,
+      nextOffset,
+      hasMore: (data?.length ?? 0) === limit,
+    });
+  }
+
+  if (body.action === "replace_provider_links") {
+    const providerId = str(body.providerId)?.trim();
+    const rawContents = Array.isArray(body.contents) ? body.contents : [];
+    if (!providerId || providerId.length > 200 || rawContents.length < 1 ||
+      rawContents.length > MAX_LINK_REFRESH_BATCH_CONTENTS) {
+      return json(400, {
+        error: `providerId and 1-${MAX_LINK_REFRESH_BATCH_CONTENTS} contents are required`,
+      });
+    }
+
+    const contents = (rawContents as unknown[]).flatMap((rawContent) => {
+      if (!rawContent || typeof rawContent !== "object" || Array.isArray(rawContent)) return [];
+      const content = rawContent as Record<string, unknown>;
+      const contentId = str(content.contentId);
+      if (!contentId || !/^[0-9a-fA-F-]{36}$/.test(contentId)) return [];
+      const sources = Array.isArray(content.sources)
+        ? (content.sources as unknown[])
+          .filter((source): source is Record<string, unknown> =>
+            !!source && typeof source === "object" && !Array.isArray(source))
+          .slice(0, MAX_SOURCES_PER_EPISODE)
+          .map((source) => mapResolvedRefreshSource(source, providerId))
+          .filter((source): source is Record<string, unknown> => source !== null)
+        : [];
+      const episodes = Array.isArray(content.episodes)
+        ? (content.episodes as unknown[])
+          .filter((episode): episode is Record<string, unknown> =>
+            !!episode && typeof episode === "object" && !Array.isArray(episode))
+          .map((episode) => mapRefreshEpisode(episode, providerId))
+          .filter((episode): episode is Record<string, unknown> => episode !== null)
+        : [];
+      if (sources.length === 0 && episodes.length === 0) return [];
+      return [{ content_id: contentId, sources, episodes }];
+    });
+    if (contents.length === 0) {
+      return json(400, { error: "contents must include at least one newly resolved playable link" });
+    }
+
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    if (!serviceRoleKey || !supabaseUrl) {
+      return json(503, { error: "server side Supabase secrets are not configured for this project" });
+    }
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data, error } = await admin.rpc("import_sync_replace_provider_links", {
+      p_provider_id: providerId,
+      p_contents: contents,
+    });
+    if (error) {
+      console.error("import_sync_replace_provider_links failed:", error.code ?? "unknown");
+      return json(422, { error: "database rejected the provider link replacement" });
+    }
+    const counts = (data ?? {}) as Record<string, number>;
+    return json(200, {
+      replacedContents: Number(counts.replaced_contents ?? 0),
+      replacedEpisodes: Number(counts.replaced_episodes ?? 0),
+      replacedSources: Number(counts.replaced_sources ?? 0),
+      unmatchedEpisodes: Number(counts.unmatched_episodes ?? 0),
     });
   }
 

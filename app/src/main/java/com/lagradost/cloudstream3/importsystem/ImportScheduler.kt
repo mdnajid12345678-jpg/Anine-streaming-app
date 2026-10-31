@@ -123,34 +123,21 @@ class ImportWorker(
 
         return try {
             val callerKey = settings.importer.edgeFunctionKey.get().trim()
-            val canCheckExistingTitles = BuildConfig.SUPABASE_CONFIGURED && callerKey.isNotEmpty()
-            val existingTitles = if (canCheckExistingTitles) {
-                val client = SupabaseImportClient(
-                    functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
-                    publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
-                    callerKey = callerKey,
-                )
-                client.existingProviderTitles(config.providerNames)
-            } else {
-                emptyMap()
-            }
+            val client = SupabaseImportClient(
+                functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
+                publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
+                callerKey = callerKey,
+            )
+            val existingTitles = client.existingProviderTitles(config.providerNames)
             val engine = ImportEngine(
                 config = config,
                 providers = providers,
                 existingProviderTitles = existingTitles,
-                initialWarnings = if (canCheckExistingTitles) emptyList() else listOf(
-                    "Previously imported titles could not be checked for this scheduled scan",
-                ),
             )
             val result = engine.run()
 
             if (config.uploadToSupabase && BuildConfig.SUPABASE_CONFIGURED) {
                 val payload = buildPayload(config, result, settings)
-                val client = SupabaseImportClient(
-                    functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
-                    publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
-                    callerKey = settings.importer.edgeFunctionKey.get(),
-                )
                 runCatching { client.upload(payload) }
                     .onFailure { return Result.retry() }
             }
