@@ -291,7 +291,7 @@ class ImportEngineTest {
 
         val secondProvider = FakeProvider().apply {
             searchResponseByPage = firstProvider.searchResponseByPage
-            pagesWithNext = setOf(1)
+            pagesWithNext = setOf(1, 2)
         }
         val second = ImportEngine(
             config = config().copy(
@@ -340,6 +340,7 @@ class ImportEngineTest {
 
         assertEquals("catalog scan must resume at page 2", listOf(2), secondProvider.catalogPagesRequested)
         assertEquals(listOf(NEW_TITLE), second.contents.values.map { it.title })
+        assertEquals("at the catalog tail, begin checking page 1 for new releases", 1, second.nextPageOffsets.values.single())
     }
 
     @Test
