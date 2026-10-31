@@ -823,6 +823,7 @@
     <string name="import_no_provider_selected">No provider selected</string>
     <string name="import_scan_group">Scan configuration</string>
     <string name="import_categories">Content categories</string>
+    <string name="import_unlimited_scan_summary">No item, page, or episode cap. Scanning continues to the end of each selected provider catalog. If playable-link resolution is enabled, every episode is attempted. Pause finishes the current page and saves the scanned batch and cursor on this device; import the batch now or resume later, even after closing the app.</string>
     <string name="import_year_from">From year</string>
     <string name="import_year_to">To year</string>
     <string name="import_added_date_title">Provider-added date</string>
@@ -837,6 +838,8 @@
     <string name="import_max_episodes">Episode limit per series</string>
     <string name="import_run_group">Run</string>
     <string name="import_start_scan">Start preview scan</string>
+    <string name="import_resume_scan">Resume saved scan</string>
+    <string name="import_pause_scan">Pause after this page</string>
     <string name="import_cancel">Cancel</string>
     <string name="import_new_link">New Link</string>
     <string name="import_new_link_title">Refresh playable links</string>
@@ -874,6 +877,7 @@
     <string name="import_phase_writing">Writing…</string>
     <string name="import_phase_preview">Preview ready</string>
     <string name="import_phase_done">Done</string>
+    <string name="import_phase_paused">Paused · saved on this device</string>
     <string name="import_phase_cancelled">Cancelled</string>
     <string name="import_phase_failed">Failed</string>
 </resources>

@@ -247,7 +247,7 @@ function mapContent(c: Record<string, unknown>): Record<string, unknown> | null 
   });
 }
 
-/** Reuse an existing canonical key when a provider omits a year or reports a compatible one. */
+/** Reuse an existing canonical key when providers use compatible detailed type labels. */
 async function reconcileCanonicalKeys(
   admin: ReturnType<typeof createClient>,
   contents: Record<string, unknown>[],
@@ -257,7 +257,7 @@ async function reconcileCanonicalKeys(
     .filter((title): title is string => !!title))];
   const existingByTitle = new Map<string, Array<{
     canonical_key: string;
-    content_type: string;
+    identity_kind: string;
     release_year: number | null;
   }>>();
 
@@ -279,7 +279,9 @@ async function reconcileCanonicalKeys(
         const records = existingByTitle.get(row.normalized_title) ?? [];
         records.push({
           canonical_key: row.canonical_key,
-          content_type: row.content_type,
+          // The Android key's first component is the deliberate identity family (movie/series/
+          // other); detailed types such as anime_series and series can still be one work.
+          identity_kind: row.canonical_key.split("|", 1)[0],
           release_year: typeof row.release_year === "number" ? row.release_year : null,
         });
         existingByTitle.set(row.normalized_title, records);
@@ -296,11 +298,11 @@ async function reconcileCanonicalKeys(
 
   for (const content of contents) {
     const title = str(content.normalized_title);
-    const contentType = str(content.content_type);
-    if (!title || !contentType) continue;
+    const identityKind = str(content.canonical_key)?.split("|", 1)[0];
+    if (!title || !identityKind) continue;
     const incomingYear = typeof content.release_year === "number" ? content.release_year : null;
     const compatible = (existingByTitle.get(title) ?? []).filter((existing) =>
-      existing.content_type === contentType &&
+      existing.identity_kind === identityKind &&
       (incomingYear === null || existing.release_year === null || existing.release_year === incomingYear)
     );
     const exact = compatible.filter((existing) => existing.release_year === incomingYear);

@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.importsystem
 
+import android.content.Context
 import com.lagradost.cloudstream3.BuildConfig
 import com.lagradost.cloudstream4.AppSettings
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +17,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * App scoped coordinator for the import feature.
@@ -37,6 +39,8 @@ object ImportManager {
         val jobId: String? = null,
         /** Cursor produced by the preview; committed only once its data is safely stored. */
         val nextPageOffsets: Map<String, Int> = emptyMap(),
+        val sessionConfig: ImportConfig? = null,
+        val sessionStatus: ImportSessionStatus? = null,
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -44,6 +48,31 @@ object ImportManager {
     val state: StateFlow<State> = _state.asStateFlow()
 
     private var job: Job? = null
+    private var sessionStore: ImportSessionStore? = null
+    private val pauseRequested = AtomicBoolean(false)
+
+    /** Initialize once per process and restore a saved scan before the user resumes it. */
+    fun restore(context: Context) {
+        if (sessionStore != null) return
+        val store = ImportSessionStore(context.applicationContext)
+        sessionStore = store
+        val saved = store.loadSession() ?: return
+        val pending = store.loadPendingContents().sortedBy { it.title.lowercase() }
+        _state.update {
+            it.copy(
+                running = false,
+                progress = saved.progress,
+                preview = pending,
+                report = saved.report,
+                nextPageOffsets = saved.nextPageOffsets,
+                sessionConfig = saved.config,
+                sessionStatus = saved.status,
+                uploadMessage = if (saved.status == ImportSessionStatus.PAUSED) {
+                    "Saved scan restored. Resume continues from the last committed page."
+                } else null,
+            )
+        }
+    }
 
     /**
      * Builds an [ImportConfig] from persisted user preferences. Validation problems are
@@ -87,56 +116,129 @@ object ImportManager {
         Json.decodeFromString<Map<String, Int>>(raw).filterValues { it >= 1 }
     }.getOrDefault(emptyMap())
 
-    /** Called only after content is stored, or when the completed scan had nothing to save. */
+    /** Compatibility cursor for existing daily/incremental scans. */
     fun persistScanPageOffsets(settings: AppSettings, offsets: Map<String, Int>) {
         settings.importer.scanPageOffsets.set(Json.encodeToString(offsets))
     }
 
     fun startPreview(config: ImportConfig, settings: AppSettings) {
+        if (_state.value.sessionStatus == ImportSessionStatus.PAUSED) {
+            resume(settings)
+            return
+        }
         if (job?.isActive == true || _state.value.uploading ||
             ProviderLinkRefreshManager.state.value.running
         ) return
 
+        val store = sessionStore
+        if (store == null) {
+            reportProblem("Import session storage is not initialized yet; reopen this screen and try again")
+            return
+        }
         val previous = _state.value
         if (previous.preview.isNotEmpty() && previous.report?.uploaded != true) {
-            _state.update {
-                it.copy(
-                    uploadMessage = "Save or clear the previous preview before starting another scan, " +
-                        "so its results are not lost",
-                )
-            }
+            _state.update { it.copy(uploadMessage = "Import or keep the saved batch before starting a new scan") }
             return
         }
 
-        val validationError = config.validate()
+        val scanConfig = config.copy(
+            maxItems = Int.MAX_VALUE,
+            maxPages = Int.MAX_VALUE,
+            maxEpisodesPerSeries = Int.MAX_VALUE,
+            stopAtEndOfEntryPoint = true,
+        )
+        val validationError = scanConfig.validate()
         if (validationError != null) {
             _state.update { it.copy(uploadMessage = validationError) }
             return
         }
+        store.clearAll()
+        val initialProgress = ImportProgress(
+            phase = ImportPhase.DISCOVERING,
+            startedAt = nowMs(),
+            message = "Checking previously imported titles",
+        )
+        runScan(scanConfig, settings, emptyMap(), initialProgress, null)
+    }
 
-        val providers = ImportEngine.installedProviders()
-            .filter { it.name in config.providerNames }
-
-        if (providers.isEmpty()) {
-            _state.update {
-                it.copy(uploadMessage = "None of the selected providers are currently installed")
-            }
+    fun resume(settings: AppSettings) {
+        if (job?.isActive == true || _state.value.uploading ||
+            ProviderLinkRefreshManager.state.value.running
+        ) return
+        val store = sessionStore
+        val saved = store?.loadSession()
+        if (store == null || saved == null) {
+            reportProblem("No saved scan checkpoint was found")
             return
         }
+        if (saved.status == ImportSessionStatus.COMPLETED) {
+            reportProblem("This scan is already complete; import its saved batch or start a new scan")
+            return
+        }
+        val config = saved.config.copy(pageOffsets = saved.nextPageOffsets)
+        val pending = store.loadPendingContents().associateBy { it.canonicalKey }
+        runScan(
+            config,
+            settings,
+            pending,
+            saved.progress,
+            saved.report?.copy(uploaded = false, jobId = null),
+        )
+    }
 
+    /** Stops at the end of the current provider page, after saving the cursor and scanned batch. */
+    fun pause() {
+        if (!_state.value.running) return
+        pauseRequested.set(true)
         _state.update {
-            State(
+            it.copy(progress = it.progress.copy(message = "Pausing after the current page…"))
+        }
+    }
+
+    private fun runScan(
+        config: ImportConfig,
+        settings: AppSettings,
+        initialContents: Map<String, CanonicalContent>,
+        initialProgress: ImportProgress,
+        previousReport: ImportReport?,
+    ) {
+        val store = sessionStore ?: return
+        val providers = ImportEngine.installedProviders().filter { it.name in config.providerNames }
+        if (providers.isEmpty()) {
+            _state.update { it.copy(uploadMessage = "None of the selected providers are currently installed") }
+            return
+        }
+        pauseRequested.set(false)
+        val runningProgress = initialProgress.copy(
+            phase = ImportPhase.DISCOVERING,
+            finishedAt = null,
+            message = if (initialContents.isEmpty()) "Checking previously imported titles" else "Resuming saved scan",
+        )
+        store.saveSession(
+            ImportScanSession(
+                config = config.copy(pageOffsets = config.pageOffsets),
+                progress = runningProgress,
+                nextPageOffsets = config.pageOffsets,
+                status = ImportSessionStatus.RUNNING,
+                report = previousReport,
+                updatedAt = nowMs(),
+            ),
+        )
+        _state.update {
+            it.copy(
                 running = true,
-                progress = ImportProgress(
-                    phase = ImportPhase.DISCOVERING,
-                    startedAt = nowMs(),
-                    message = "Checking previously imported titles",
-                ),
+                progress = runningProgress,
+                preview = initialContents.values.sortedBy { content -> content.title.lowercase() },
+                report = previousReport,
+                nextPageOffsets = config.pageOffsets,
+                sessionConfig = config,
+                sessionStatus = ImportSessionStatus.RUNNING,
+                uploadMessage = null,
             )
         }
 
         job = scope.launch {
-            val started = nowMs()
+            val startedAt = initialProgress.startedAt ?: nowMs()
             try {
                 val callerKey = settings.importer.edgeFunctionKey.get().trim()
                 val existingTitles = SupabaseImportClient(
@@ -149,74 +251,140 @@ object ImportManager {
                     config = config,
                     providers = providers,
                     existingProviderTitles = existingTitles,
+                    initialContents = initialContents,
+                    initialWarnings = previousReport?.warnings.orEmpty(),
+                    initialProgress = initialProgress,
                     emit = { progress -> _state.update { it.copy(progress = progress) } },
+                    pauseRequested = { pauseRequested.get() },
+                    onContentChanged = { content ->
+                        store.savePendingContent(content)
+                        _state.update { current -> current.withPendingContent(content) }
+                    },
+                    onCheckpoint = { checkpoint ->
+                        val status = if (pauseRequested.get() ||
+                            checkpoint.progress.phase == ImportPhase.PAUSED
+                        ) ImportSessionStatus.PAUSED else ImportSessionStatus.RUNNING
+                        val savedConfig = config.copy(pageOffsets = checkpoint.nextPageOffsets)
+                        val report = _state.value.report
+                        store.saveSession(
+                            ImportScanSession(
+                                config = savedConfig,
+                                progress = checkpoint.progress,
+                                nextPageOffsets = checkpoint.nextPageOffsets,
+                                status = status,
+                                report = report,
+                                updatedAt = nowMs(),
+                            ),
+                        )
+                        _state.update { current ->
+                            current.copy(
+                                progress = checkpoint.progress,
+                                preview = checkpoint.contents.values.sortedBy { it.title.lowercase() },
+                                nextPageOffsets = checkpoint.nextPageOffsets,
+                                sessionConfig = savedConfig,
+                                sessionStatus = status,
+                            )
+                        }
+                    },
                 )
                 val result = withContext(Dispatchers.IO) { engine.run() }
-
+                val sessionStatus = if (result.progress.phase == ImportPhase.PAUSED) {
+                    ImportSessionStatus.PAUSED
+                } else {
+                    ImportSessionStatus.COMPLETED
+                }
+                val report = ImportReport(
+                    progress = result.progress,
+                    failures = previousReport?.failures.orEmpty() + result.failures,
+                    warnings = result.warnings,
+                    reviewFlags = result.reviewFlags,
+                    durationMs = nowMs() - startedAt,
+                )
+                val savedConfig = config.copy(pageOffsets = result.nextPageOffsets)
+                store.saveSession(
+                    ImportScanSession(
+                        config = savedConfig,
+                        progress = result.progress,
+                        nextPageOffsets = result.nextPageOffsets,
+                        status = sessionStatus,
+                        report = report,
+                        updatedAt = nowMs(),
+                    ),
+                )
+                val pending = store.loadPendingContents()
                 _state.update {
                     it.copy(
                         running = false,
                         progress = result.progress,
-                        preview = result.contents.values
-                            .sortedWith(compareByDescending<CanonicalContent> { it.releaseYear ?: 0 }
-                                .thenBy { it.title.lowercase() }),
-                        report = ImportReport(
-                            progress = result.progress,
-                            failures = result.failures,
-                            warnings = result.warnings,
-                            reviewFlags = result.reviewFlags,
-                            durationMs = nowMs() - started,
-                        ),
+                        preview = pending.sortedBy { content -> content.title.lowercase() },
+                        report = report,
                         nextPageOffsets = result.nextPageOffsets,
+                        sessionConfig = savedConfig,
+                        sessionStatus = sessionStatus,
                         uploadMessage = null,
                     )
                 }
 
-                // Auto-save: a scan the user explicitly started is written to Supabase as soon
-                // as it finishes, so a long scan is never lost to a missed button press. It
-                // still honours the "Upload to Supabase" preference; with it off the preview
-                // waits for the manual "Import to database" button exactly as before.
-                val completed = result.progress.phase == ImportPhase.PREVIEW_READY ||
-                    result.progress.phase == ImportPhase.DONE
-                if (config.uploadToSupabase &&
-                    BuildConfig.SUPABASE_CONFIGURED &&
-                    completed &&
-                    result.contents.isNotEmpty()
-                ) {
+                val completed = sessionStatus == ImportSessionStatus.COMPLETED
+                if (completed && config.uploadToSupabase && BuildConfig.SUPABASE_CONFIGURED && pending.isNotEmpty()) {
                     uploadPreview(settings)
-                } else if (completed && result.contents.isEmpty() && result.failures.isEmpty()) {
-                    // No new payload exists to save; safe to remember already-known/filtered pages.
+                } else if (completed && pending.isEmpty() && result.failures.isEmpty()) {
                     persistScanPageOffsets(settings, result.nextPageOffsets)
                 }
             } catch (t: Throwable) {
-                _state.update { current ->
-                    val cancelled = current.progress.phase == ImportPhase.CANCELLED
-                    val progress = current.progress.copy(
-                        phase = if (cancelled) ImportPhase.CANCELLED else ImportPhase.FAILED,
-                        finishedAt = nowMs(),
-                        message = t.message,
-                    )
-                    val failure = ImportFailure(
-                        provider = current.progress.providerName,
-                        stage = FailureStage.PROVIDER,
-                        message = t.message ?: t::class.simpleName ?: "unknown error",
-                        at = nowMs(),
-                    )
-                    current.copy(
+                val cancelled = t is CancellationException || pauseRequested.get()
+                val current = _state.value
+                val progress = current.progress.copy(
+                    phase = ImportPhase.PAUSED,
+                    finishedAt = nowMs(),
+                    message = if (cancelled) "Scan saved and paused at the last checkpoint" else t.message,
+                )
+                val failure = if (cancelled) null else ImportFailure(
+                    provider = current.progress.providerName,
+                    stage = FailureStage.PROVIDER,
+                    message = t.message ?: t::class.simpleName ?: "unknown error",
+                    at = nowMs(),
+                )
+                val report = ImportReport(
+                    progress = progress,
+                    failures = current.report?.failures.orEmpty() + listOfNotNull(failure),
+                    warnings = current.report?.warnings.orEmpty(),
+                    reviewFlags = current.report?.reviewFlags.orEmpty(),
+                    durationMs = nowMs() - startedAt,
+                    uploadError = t.message,
+                )
+                val savedConfig = config.copy(pageOffsets = current.nextPageOffsets)
+                store.saveSession(
+                    ImportScanSession(
+                        config = savedConfig,
+                        progress = progress,
+                        nextPageOffsets = current.nextPageOffsets,
+                        status = ImportSessionStatus.PAUSED,
+                        report = report,
+                        updatedAt = nowMs(),
+                    ),
+                )
+                _state.update {
+                    it.copy(
                         running = false,
                         progress = progress,
-                        report = ImportReport(
-                            progress = progress,
-                            failures = current.report?.failures.orEmpty() + failure,
-                            warnings = current.report?.warnings.orEmpty(),
-                            reviewFlags = current.report?.reviewFlags.orEmpty(),
-                            durationMs = nowMs() - (current.progress.startedAt ?: nowMs()),
-                            uploadError = t.message,
-                        ),
+                        preview = store.loadPendingContents().sortedBy { content -> content.title.lowercase() },
+                        report = report,
+                        sessionConfig = savedConfig,
+                        sessionStatus = ImportSessionStatus.PAUSED,
                     )
                 }
             }
         }
+    }
+
+    private fun State.withPendingContent(content: CanonicalContent): State {
+        val current = preview.firstOrNull { it.canonicalKey == content.canonicalKey }
+        val merged = current?.let { ContentMerger.merge(it, content).content } ?: content
+        return copy(
+            preview = (preview.filterNot { it.canonicalKey == content.canonicalKey } + merged)
+                .sortedBy { it.title.lowercase() },
+        )
     }
 
     fun cancel() {
@@ -257,7 +425,7 @@ object ImportManager {
 
         scope.launch {
             val configResult = configFromSettings(settings)
-            val config = configResult.first
+            val config = snapshot.sessionConfig ?: configResult.first
             val startedAt = snapshot.progress.startedAt ?: nowMs()
             val jobId = java.util.UUID.randomUUID().toString()
 
@@ -269,8 +437,7 @@ object ImportManager {
                         .sorted(),
                     filters = buildMap {
                         put("categories", config.categories.joinToString(",") { it.name })
-                        put("max_items", config.maxItems.toString())
-                        put("max_pages", config.maxPages.toString())
+                        put("scan_mode", "unbounded_until_paused_or_catalog_end")
                         put("year_from", config.yearFrom?.toString() ?: "")
                         put("year_to", config.yearTo?.toString() ?: "")
                         put("added_on_date", config.addedOnDate.orEmpty())
@@ -327,11 +494,40 @@ object ImportManager {
 
             try {
                 val result = client.upload(payload)
-                persistScanPageOffsets(settings, snapshot.nextPageOffsets)
+                if (result.errors.isNotEmpty()) {
+                    throw IllegalStateException(result.errors.joinToString("; ").take(500))
+                }
+                val stillPaused = snapshot.sessionStatus == ImportSessionStatus.PAUSED
+                val phase = if (stillPaused) ImportPhase.PAUSED else ImportPhase.DONE
+                val progress = snapshot.progress.copy(
+                    phase = phase,
+                    message = if (stillPaused) "Batch imported; scan remains paused at its saved checkpoint" else null,
+                )
+                val report = snapshot.report?.copy(
+                    progress = progress,
+                    uploaded = true,
+                    jobId = jobId,
+                    uploadError = null,
+                )
+                sessionStore?.clearPendingContents()
+                snapshot.sessionConfig?.let { savedConfig ->
+                    sessionStore?.saveSession(
+                        ImportScanSession(
+                            config = savedConfig.copy(pageOffsets = snapshot.nextPageOffsets),
+                            progress = progress,
+                            nextPageOffsets = snapshot.nextPageOffsets,
+                            status = if (stillPaused) ImportSessionStatus.PAUSED else ImportSessionStatus.COMPLETED,
+                            report = report,
+                            updatedAt = nowMs(),
+                        ),
+                    )
+                }
+                if (!stillPaused) persistScanPageOffsets(settings, snapshot.nextPageOffsets)
                 settings.importer.lastRunAt.set(nowMs())
                 _state.update {
                     it.copy(
                         uploading = false,
+                        preview = emptyList(),
                         jobId = jobId,
                         uploadMessage = buildString {
                             append("Uploaded ")
@@ -341,37 +537,43 @@ object ImportManager {
                             append(" episodes, ")
                             append(result.upsertedSources)
                             append(" sources")
-                            if (result.errors.isNotEmpty()) {
-                                append(" — ")
-                                append(result.errors.joinToString("; ").take(300))
-                            }
                         },
-                        report = it.report?.copy(
-                            uploaded = true,
-                            jobId = jobId,
-                            uploadError = null,
-                        ),
-                        progress = it.progress.copy(
-                            phase = ImportPhase.DONE,
-                            message = null,
-                        ),
+                        report = report,
+                        progress = progress,
+                        sessionStatus = if (stillPaused) ImportSessionStatus.PAUSED else ImportSessionStatus.COMPLETED,
                     )
                 }
             } catch (t: Throwable) {
+                val stillPaused = snapshot.sessionStatus == ImportSessionStatus.PAUSED
+                val progress = snapshot.progress.copy(
+                    phase = if (stillPaused) ImportPhase.PAUSED else ImportPhase.PREVIEW_READY,
+                    message = null,
+                )
+                val report = snapshot.report?.copy(
+                    uploaded = false,
+                    jobId = jobId,
+                    uploadError = t.message,
+                    progress = progress,
+                )
+                snapshot.sessionConfig?.let { savedConfig ->
+                    sessionStore?.saveSession(
+                        ImportScanSession(
+                            config = savedConfig.copy(pageOffsets = snapshot.nextPageOffsets),
+                            progress = progress,
+                            nextPageOffsets = snapshot.nextPageOffsets,
+                            status = if (stillPaused) ImportSessionStatus.PAUSED else ImportSessionStatus.COMPLETED,
+                            report = report,
+                            updatedAt = nowMs(),
+                        ),
+                    )
+                }
                 _state.update {
                     it.copy(
                         uploading = false,
                         uploadMessage = t.message ?: "Upload failed",
-                        report = it.report?.copy(
-                            uploaded = false,
-                            jobId = jobId,
-                            uploadError = t.message,
-                        ),
+                        report = report,
                         // Back to the preview so the manual button can retry after a failure.
-                        progress = it.progress.copy(
-                            phase = ImportPhase.PREVIEW_READY,
-                            message = null,
-                        ),
+                        progress = progress,
                     )
                 }
             }
@@ -381,7 +583,7 @@ object ImportManager {
     /** Clears the finished report when the user dismisses it. */
     fun clearReport() {
         _state.update {
-            it.copy(report = null, preview = emptyList(), uploadMessage = null, jobId = null)
+            it.copy(report = null, uploadMessage = null, jobId = null)
         }
     }
 

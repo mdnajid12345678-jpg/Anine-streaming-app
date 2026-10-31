@@ -26,6 +26,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The engine must only report what actually happened:
@@ -47,6 +48,7 @@ class ImportEngineTest {
         var searchFailuresRemaining = 0
         var suspendForever = false
         var searchCalls = 0
+        var loadType: TvType = TvType.AnimeMovie
         val searchPagesRequested = mutableListOf<Int>()
         var loadCalls = 0
         var loadLinksCalls = 0
@@ -94,7 +96,7 @@ class ImportEngineTest {
             return newMovieLoadResponse(
                 name = title,
                 url = url,
-                type = TvType.AnimeMovie,
+                type = loadType,
                 dataUrl = url,
             )
         }
@@ -380,6 +382,7 @@ class ImportEngineTest {
             }
             val second = FakeProvider().apply {
                 name = "ProviderB"
+                loadType = TvType.Movie
                 searchResponseByPage = mapOf(1 to listOf(searchItem(TITLE, "/b/frieren")))
             }
 
@@ -394,6 +397,53 @@ class ImportEngineTest {
                 result.contents.values.single().providerContents.map { it.providerId }.toSet(),
             )
         }
+
+    @Test
+    fun `pause commits current page and resume starts from its saved next page`() = runBlocking {
+        val pages = mapOf(
+            1 to listOf(searchItem(TITLE, "/anime/page-one")),
+            2 to listOf(searchItem(NEW_TITLE, "/anime/page-two")),
+        )
+        val firstProvider = FakeProvider().apply {
+            searchResponseByPage = pages
+            pagesWithNext = setOf(1)
+        }
+        val shouldPause = AtomicBoolean(false)
+        val unbounded = config().copy(
+            maxItems = Int.MAX_VALUE,
+            maxPages = Int.MAX_VALUE,
+            stopAtEndOfEntryPoint = true,
+        )
+        val first = ImportEngine(
+            config = unbounded,
+            providers = listOf(firstProvider),
+            pauseRequested = { shouldPause.get() },
+            onCheckpoint = { checkpoint ->
+                if (checkpoint.nextPageOffsets.values.any { it == 2 }) shouldPause.set(true)
+            },
+        ).run()
+
+        assertEquals(ImportPhase.PAUSED, first.progress.phase)
+        assertEquals(listOf(1), firstProvider.searchPagesRequested)
+        assertEquals(2, first.nextPageOffsets.values.single())
+        assertEquals(listOf(TITLE), first.contents.values.map { it.title })
+
+        val resumedProvider = FakeProvider().apply {
+            searchResponseByPage = pages
+            pagesWithNext = setOf(1)
+        }
+        val resumed = ImportEngine(
+            config = unbounded.copy(pageOffsets = first.nextPageOffsets),
+            providers = listOf(resumedProvider),
+            initialContents = first.contents,
+            initialProgress = first.progress,
+        ).run()
+
+        assertEquals(listOf(2), resumedProvider.searchPagesRequested)
+        assertEquals(ImportPhase.PREVIEW_READY, resumed.progress.phase)
+        assertEquals(setOf(TITLE, NEW_TITLE), resumed.contents.values.map { it.title }.toSet())
+        assertEquals(0, resumed.nextPageOffsets.values.single())
+    }
 
     @Test
     fun `selected added date includes only entries with an addedAt timestamp on that local day`() =

@@ -36,10 +36,21 @@ class ImportEngine(
     private val config: ImportConfig,
     private val providers: List<MainAPI>,
     existingProviderTitles: Map<String, Set<String>> = emptyMap(),
+    initialContents: Map<String, CanonicalContent> = emptyMap(),
     initialWarnings: List<String> = emptyList(),
+    initialProgress: ImportProgress? = null,
     private val emit: (ImportProgress) -> Unit = {},
+    private val pauseRequested: () -> Boolean = { false },
+    private val onContentChanged: (CanonicalContent) -> Unit = {},
+    private val onCheckpoint: suspend (Checkpoint) -> Unit = {},
     private val now: () -> Long = { System.currentTimeMillis() },
 ) {
+
+    data class Checkpoint(
+        val contents: Map<String, CanonicalContent>,
+        val nextPageOffsets: Map<String, Int>,
+        val progress: ImportProgress,
+    )
 
     data class Result(
         val contents: Map<String, CanonicalContent>,
@@ -53,13 +64,22 @@ class ImportEngine(
     private val lock = Any()
     private val failures = mutableListOf<ImportFailure>()
     private val warnings = initialWarnings.toMutableList()
-    private val merged = LinkedHashMap<String, CanonicalContent>()
+    private val merged = LinkedHashMap<String, CanonicalContent>().apply {
+        putAll(initialContents)
+    }
     private val nextPageOffsets = config.pageOffsets.toMutableMap()
     private val providerTitlesSeen = LinkedHashMap<String, MutableSet<String>>().apply {
+        // Only titles acknowledged by the server are safe to skip before load(). Pending local
+        // items may have been interrupted during loadLinks(), so their current page is replayed
+        // idempotently after process death to finish resolving every provider source.
         existingProviderTitles.forEach { (provider, titles) -> put(provider, titles.toMutableSet()) }
     }
 
-    private var progress = ImportProgress(
+    private var progress = initialProgress?.copy(
+        phase = ImportPhase.DISCOVERING,
+        finishedAt = null,
+        message = "Resuming saved scan",
+    ) ?: ImportProgress(
         phase = ImportPhase.DISCOVERING,
         startedAt = now(),
     )
@@ -97,10 +117,14 @@ class ImportEngine(
 
     suspend fun run(): Result {
         val started = now()
+        var paused = false
         try {
             for (provider in providers) {
                 coroutineContext.ensureActive()
-                scanProvider(provider)
+                if (pauseRequested() || scanProvider(provider)) {
+                    paused = true
+                    break
+                }
             }
         } catch (e: CancellationException) {
             update {
@@ -118,10 +142,11 @@ class ImportEngine(
             throw t
         }
 
+        if (failures.isNotEmpty()) paused = true
         update {
             it.copy(
                 phase = ImportPhase.LOADING,
-                message = "Building review list",
+                message = if (paused) "Saving the current scan checkpoint" else "Building review list",
             )
         }
 
@@ -129,11 +154,17 @@ class ImportEngine(
         val snapshot = synchronized(lock) { merged.toMap() }
         update {
             it.copy(
-                phase = ImportPhase.PREVIEW_READY,
+                phase = if (paused) ImportPhase.PAUSED else ImportPhase.PREVIEW_READY,
                 finishedAt = now(),
-                message = "Preview ready: ${snapshot.size} canonical titles",
+                message = if (paused) {
+                    "Paused safely: ${snapshot.size} scanned titles saved; resume from the last checkpoint"
+                } else {
+                    "Preview ready: ${snapshot.size} canonical titles"
+                },
             )
         }
+
+        persistCheckpoint()
 
         return Result(
             contents = snapshot,
@@ -160,7 +191,7 @@ class ImportEngine(
         return listOf(provider.name, filterScope, entryPoint, identity).joinToString("\u001f")
     }
 
-    private suspend fun scanProvider(provider: MainAPI) {
+    private suspend fun scanProvider(provider: MainAPI): Boolean {
         update { it.copy(providerName = provider.name, phase = ImportPhase.DISCOVERING) }
 
         val seenUrls = LinkedHashSet<String>()
@@ -214,11 +245,18 @@ class ImportEngine(
 
         // 1. keyword seeds through the real search API
         for (query in config.searchQueries) {
+            if (pauseRequested()) return true
             if (newlyAdded >= config.maxItems) break
             val cursorKey = pageCursorKey(provider, "search", query)
-            var page = (nextPageOffsets[cursorKey] ?: 1).coerceAtLeast(1)
+            val savedPage = nextPageOffsets[cursorKey] ?: 1
+            if (savedPage == 0) {
+                anyEntryPointWorked = true
+                continue
+            }
+            var page = savedPage.coerceAtLeast(1)
             var pagesRequested = 0
             while (pagesRequested < config.maxPages && newlyAdded < config.maxItems) {
+                if (pauseRequested()) return true
                 coroutineContext.ensureActive()
                 val response = try {
                     retrying {
@@ -234,36 +272,56 @@ class ImportEngine(
                         null,
                         "search(\"$query\", $page) failed: ${describe(t)}",
                     )
+                    nextPageOffsets[cursorKey] = page
+                    persistCheckpoint()
                     break
                 }
-                if (response == null) break
+                if (response == null) {
+                    nextPageOffsets[cursorKey] = if (config.stopAtEndOfEntryPoint) 0 else 1
+                    persistCheckpoint()
+                    if (pauseRequested()) return true
+                    break
+                }
                 anyEntryPointWorked = true
                 pagesRequested++
                 val pageCompleted = processPageItems(response.items)
                 if (!pageCompleted) {
                     nextPageOffsets[cursorKey] = page
+                    persistCheckpoint()
+                    if (pauseRequested()) return true
                     break
                 }
                 if (!response.hasNext) {
-                    // Catalogs can grow at the head; wrap after the known tail is fully scanned.
-                    nextPageOffsets[cursorKey] = 1
+                    // A resumable manual scan is one pass; scheduled incremental scans may wrap.
+                    nextPageOffsets[cursorKey] = if (config.stopAtEndOfEntryPoint) 0 else 1
+                    persistCheckpoint()
+                    if (pauseRequested()) return true
                     break
                 }
                 page++
                 nextPageOffsets[cursorKey] = page
+                persistCheckpoint()
+                if (pauseRequested()) return true
             }
         }
 
         // 2. catalog pages through the real homepage API
         if (provider.hasMainPage && newlyAdded < config.maxItems) {
             for (request in provider.mainPage) {
+                if (pauseRequested()) return true
                 if (newlyAdded >= config.maxItems) break
                 if (request.data.isBlank()) continue
                 val identity = "${request.name}\u001f${request.data}\u001f${request.horizontalImages}"
                 val cursorKey = pageCursorKey(provider, "catalog", identity)
-                var page = (nextPageOffsets[cursorKey] ?: 1).coerceAtLeast(1)
+                val savedPage = nextPageOffsets[cursorKey] ?: 1
+                if (savedPage == 0) {
+                    anyEntryPointWorked = true
+                    continue
+                }
+                var page = savedPage.coerceAtLeast(1)
                 var pagesRequested = 0
                 while (pagesRequested < config.maxPages && newlyAdded < config.maxItems) {
+                    if (pauseRequested()) return true
                     coroutineContext.ensureActive()
                     val mainPageRequest = MainPageRequest(
                         name = request.name,
@@ -284,23 +342,36 @@ class ImportEngine(
                             null,
                             "getMainPage(page=$page, \"${request.name}\") failed: ${describe(t)}",
                         )
+                        nextPageOffsets[cursorKey] = page
+                        persistCheckpoint()
                         break
                     }
-                    if (response == null) break
+                    if (response == null) {
+                        nextPageOffsets[cursorKey] = if (config.stopAtEndOfEntryPoint) 0 else 1
+                        persistCheckpoint()
+                        if (pauseRequested()) return true
+                        break
+                    }
                     anyEntryPointWorked = true
                     pagesRequested++
                     update { it.copy(catalogPagesScanned = it.catalogPagesScanned + 1) }
                     val pageCompleted = processPageItems(response.items.flatMap { row -> row.list })
                     if (!pageCompleted) {
                         nextPageOffsets[cursorKey] = page
+                        persistCheckpoint()
+                        if (pauseRequested()) return true
                         break
                     }
                     if (!response.hasNext) {
-                        nextPageOffsets[cursorKey] = 1
+                        nextPageOffsets[cursorKey] = if (config.stopAtEndOfEntryPoint) 0 else 1
+                        persistCheckpoint()
+                        if (pauseRequested()) return true
                         break
                     }
                     page++
                     nextPageOffsets[cursorKey] = page
+                    persistCheckpoint()
+                    if (pauseRequested()) return true
                 }
             }
         }
@@ -313,7 +384,7 @@ class ImportEngine(
                 "Provider exposes neither a usable getMainPage() nor search() result, " +
                     "so it cannot be scanned",
             )
-            return
+            return pauseRequested()
         }
 
         if (newlyAdded == 0) {
@@ -325,6 +396,18 @@ class ImportEngine(
                     "did not expose an added date; exact-date scanning requires addedAt metadata",
             )
         }
+        return pauseRequested()
+    }
+
+    private suspend fun persistCheckpoint() {
+        val checkpoint = synchronized(lock) {
+            Checkpoint(
+                contents = merged.toMap(),
+                nextPageOffsets = nextPageOffsets.toMap(),
+                progress = progress,
+            )
+        }
+        onCheckpoint(checkpoint)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -420,7 +503,7 @@ class ImportEngine(
                 false to key
             } else {
                 val matching = merged.entries.firstOrNull { (_, existing) ->
-                    existing.contentType == content.contentType &&
+                    existing.canonicalKey.substringBefore('|') == content.canonicalKey.substringBefore('|') &&
                         existing.normalizedTitle == content.normalizedTitle &&
                         TitleNormalizer.canMerge(
                             existing.title,
@@ -447,6 +530,8 @@ class ImportEngine(
             )
         }
         if (!accepted) return false
+
+        getContent(targetKey)?.let(onContentChanged)
 
         if (config.resolveLinks) {
             resolveLinks(provider, loaded, targetKey)
@@ -480,6 +565,8 @@ class ImportEngine(
                 lastSeenAt = nowMs,
                 providerMetadata = buildMap {
                     put("api_name", loaded.apiName)
+                    put("tv_type", loaded.type.name)
+                    put("content_type", contentTypeName(loaded.type))
                     put("poster_url", loaded.posterUrl ?: "")
                     providerAddedAt?.let { put("added_at", it.toString()) }
                     if (loaded.plot != null) put("has_description", "true")
@@ -672,41 +759,43 @@ class ImportEngine(
         sources: List<ImportEpisodeSource>,
         @Suppress("UNUSED_PARAMETER") providerId: String,
     ) {
+        var changed: CanonicalContent? = null
         synchronized(lock) {
             val content = merged[key] ?: return
 
             if (label == "movie") {
-                merged[key] = content.copy(
+                changed = content.copy(
                     sources = (content.sources + sources)
                         .distinctBy { ContentMerger.sourceKey(it) },
                 )
-                return
+            } else {
+                val seasonNumber = label.substringBefore('e').removePrefix("s").toIntOrNull()
+                val episodeNumber = label.substringAfter('e').toIntOrNull()
+
+                val seasons = content.seasons.toMutableList()
+                val seasonIndex = seasons.indexOfFirst { it.seasonNumber == seasonNumber }
+                if (seasonIndex < 0) return
+
+                val season = seasons[seasonIndex]
+                val episodeIndex = season.episodes.indexOfFirst {
+                    it.episodeNumber == episodeNumber &&
+                        (seasonNumber == null || it.seasonNumber == seasonNumber)
+                }
+                if (episodeIndex < 0) return
+
+                val episode = season.episodes[episodeIndex]
+                val mergedEpisode = episode.copy(
+                    sources = (episode.sources + sources).distinctBy { ContentMerger.sourceKey(it) },
+                )
+                val episodes = season.episodes.toMutableList()
+                episodes[episodeIndex] = mergedEpisode
+                seasons[seasonIndex] = season.copy(episodes = episodes)
+
+                changed = content.copy(seasons = seasons)
             }
-
-            val seasonNumber = label.substringBefore('e').removePrefix("s").toIntOrNull()
-            val episodeNumber = label.substringAfter('e').toIntOrNull()
-
-            val seasons = content.seasons.toMutableList()
-            val seasonIndex = seasons.indexOfFirst { it.seasonNumber == seasonNumber }
-            if (seasonIndex < 0) return
-
-            val season = seasons[seasonIndex]
-            val episodeIndex = season.episodes.indexOfFirst {
-                it.episodeNumber == episodeNumber &&
-                    (seasonNumber == null || it.seasonNumber == seasonNumber)
-            }
-            if (episodeIndex < 0) return
-
-            val episode = season.episodes[episodeIndex]
-            val mergedEpisode = episode.copy(
-                sources = (episode.sources + sources).distinctBy { ContentMerger.sourceKey(it) },
-            )
-            val episodes = season.episodes.toMutableList()
-            episodes[episodeIndex] = mergedEpisode
-            seasons[seasonIndex] = season.copy(episodes = episodes)
-
-            merged[key] = content.copy(seasons = seasons)
+            changed?.let { merged[key] = it }
         }
+        changed?.let(onContentChanged)
     }
 
     // -----------------------------------------------------------------------------------------

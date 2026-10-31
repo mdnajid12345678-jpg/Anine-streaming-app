@@ -72,6 +72,8 @@ data class ImportConfig(
     val maxPages: Int = 3,
     /** Next page per provider/search/catalog entry point, persisted after a successful save. */
     val pageOffsets: Map<String, Int> = emptyMap(),
+    /** Exhausted entry points stay completed for a resumable one-pass scan instead of wrapping. */
+    val stopAtEndOfEntryPoint: Boolean = false,
     /** Optional keyword seeds, scanned through MainAPI.search() when the provider supports it. */
     val searchQueries: List<String> = emptyList(),
     /** When false only metadata is imported, loadLinks() is never called. */
@@ -141,6 +143,7 @@ enum class ImportPhase {
     WRITING,
     PREVIEW_READY,
     DONE,
+    PAUSED,
     CANCELLED,
     FAILED,
 }
@@ -163,6 +166,24 @@ data class ImportProgress(
     val message: String? = null,
     val startedAt: Long? = null,
     val finishedAt: Long? = null,
+)
+
+@Serializable
+enum class ImportSessionStatus {
+    RUNNING,
+    PAUSED,
+    COMPLETED,
+}
+
+/** Persisted scan definition, progress and per-entrypoint cursors, restored after process death. */
+@Serializable
+data class ImportScanSession(
+    val config: ImportConfig,
+    val progress: ImportProgress,
+    val nextPageOffsets: Map<String, Int> = emptyMap(),
+    val status: ImportSessionStatus = ImportSessionStatus.RUNNING,
+    val report: ImportReport? = null,
+    val updatedAt: Long,
 )
 
 /** Final report shown after a run, with expandable failures/warnings. */

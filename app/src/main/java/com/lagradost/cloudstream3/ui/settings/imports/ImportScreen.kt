@@ -19,6 +19,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -123,6 +124,9 @@ object ImportScreen : SearchableSettings {
                         entries = categoryEntries,
                         preference = settings.importer.categories,
                     ),
+                    Preference.PreferenceItem.InfoPreference(
+                        title = stringResource(R.string.import_unlimited_scan_summary),
+                    ),
                     Preference.PreferenceItem.EditTextPreference(
                         title = stringResource(R.string.import_year_from),
                         preference = settings.importer.yearFrom,
@@ -137,18 +141,6 @@ object ImportScreen : SearchableSettings {
                         title = stringResource(R.string.import_added_date_title),
                         content = { AddedOnDateFilter(settings) },
                     ),
-                    Preference.PreferenceItem.SliderPreference(
-                        title = stringResource(R.string.import_max_items),
-                        icon = painterResource(R.drawable.baseline_list_alt_24),
-                        preference = settings.importer.maxItems,
-                        valueRange = 1..300,
-                    ),
-                    Preference.PreferenceItem.SliderPreference(
-                        title = stringResource(R.string.import_max_pages),
-                        icon = painterResource(R.drawable.baseline_list_alt_24),
-                        preference = settings.importer.maxPages,
-                        valueRange = 1..20,
-                    ),
                     Preference.PreferenceItem.EditTextPreference(
                         title = stringResource(R.string.import_search_queries),
                         preference = settings.importer.searchQueries,
@@ -159,13 +151,6 @@ object ImportScreen : SearchableSettings {
                         icon = painterResource(R.drawable.ic_baseline_ondemand_video_24),
                         subtitle = stringResource(R.string.import_resolve_links_summary),
                         preference = settings.importer.resolveLinks,
-                    ),
-                    Preference.PreferenceItem.SliderPreference(
-                        title = stringResource(R.string.import_max_episodes),
-                        icon = painterResource(R.drawable.baseline_list_alt_24),
-                        preference = settings.importer.maxEpisodesPerSeries,
-                        valueRange = 1..100,
-                        enabled = settings.importer.resolveLinks.get(),
                     ),
                 ),
             ),
@@ -178,7 +163,7 @@ object ImportScreen : SearchableSettings {
                 preferenceItems = persistentListOf(
                     Preference.PreferenceItem.CustomPreference(
                         title = stringResource(R.string.import_run_group),
-                        content = { RunPanel(state, linkRefreshState, settings, providers) },
+                        content = { RunPanel(state, linkRefreshState, settings, providers, context) },
                     ),
                     Preference.PreferenceItem.SwitchPreference(
                         title = stringResource(R.string.import_upload_enabled),
@@ -288,7 +273,9 @@ object ImportScreen : SearchableSettings {
         linkState: ProviderLinkRefreshManager.State,
         settings: AppSettings,
         providers: List<com.lagradost.cloudstream3.MainAPI>,
+        context: android.content.Context,
     ) {
+        LaunchedEffect(context) { ImportManager.restore(context.applicationContext) }
         var showProviderPicker by remember { mutableStateOf(false) }
         var selectedProvider by remember { mutableStateOf(providers.firstOrNull()?.name) }
 
@@ -329,7 +316,13 @@ object ImportScreen : SearchableSettings {
                             }
                         },
                 ) {
-                    Text(stringResource(R.string.import_start_scan))
+                    Text(
+                        stringResource(
+                            if (state.sessionStatus == com.lagradost.cloudstream3.importsystem.ImportSessionStatus.PAUSED) {
+                                R.string.import_resume_scan
+                            } else R.string.import_start_scan,
+                        ),
+                    )
                 }
                 OutlinedButton(
                     enabled = !state.running && !state.uploading && !linkState.running,
@@ -342,9 +335,9 @@ object ImportScreen : SearchableSettings {
                 }
                 OutlinedButton(
                     enabled = state.running,
-                    onClick = { ImportManager.cancel() },
+                    onClick = { ImportManager.pause() },
                 ) {
-                    Text(stringResource(R.string.import_cancel))
+                    Text(stringResource(R.string.import_pause_scan))
                 }
                 if (linkState.running) {
                     OutlinedButton(onClick = { ProviderLinkRefreshManager.cancel() }) {
@@ -502,7 +495,7 @@ object ImportScreen : SearchableSettings {
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            enabled = !state.uploading && state.preview.isNotEmpty(),
+                            enabled = !state.running && !state.uploading && state.preview.isNotEmpty(),
                             onClick = { ImportManager.uploadPreview(settings) },
                         ) {
                             Text(
@@ -609,6 +602,7 @@ object ImportScreen : SearchableSettings {
         ImportPhase.WRITING -> stringResource(R.string.import_phase_writing)
         ImportPhase.PREVIEW_READY -> stringResource(R.string.import_phase_preview)
         ImportPhase.DONE -> stringResource(R.string.import_phase_done)
+        ImportPhase.PAUSED -> stringResource(R.string.import_phase_paused)
         ImportPhase.CANCELLED -> stringResource(R.string.import_phase_cancelled)
         ImportPhase.FAILED -> stringResource(R.string.import_phase_failed)
     }
