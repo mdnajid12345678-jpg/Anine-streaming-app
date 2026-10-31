@@ -314,7 +314,17 @@ async function reconcileCanonicalKeys(
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return json(204, {});
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-headers":
+          "content-type,apikey,authorization,x-import-caller-key,x-client",
+        "access-control-allow-methods": "POST,OPTIONS",
+      },
+    });
+  }
   if (req.method !== "POST") {
     return json(405, { error: "method not allowed, use POST" });
   }
