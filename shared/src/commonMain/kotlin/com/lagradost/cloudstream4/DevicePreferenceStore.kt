@@ -52,6 +52,8 @@ class ImportPreferences(preferences: PreferenceStore) {
     val addedOnDate = preferences.getString("import_added_on_date", "")
     val maxItems = preferences.getInt("import_max_items", 60)
     val maxPages = preferences.getInt("import_max_pages", 3)
+    /** Per-provider, per-entrypoint next page; committed only after the scan is safely saved. */
+    val scanPageOffsets = preferences.getString("import_scan_page_offsets", "{}")
     /** When false the engine never calls loadLinks(). */
     val resolveLinks = preferences.getBoolean("import_resolve_links", false)
     val maxEpisodesPerSeries = preferences.getInt("import_max_episodes", 12)

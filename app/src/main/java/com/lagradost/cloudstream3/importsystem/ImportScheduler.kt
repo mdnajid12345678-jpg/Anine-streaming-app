@@ -140,6 +140,9 @@ class ImportWorker(
                 val payload = buildPayload(config, result, settings)
                 runCatching { client.upload(payload) }
                     .onFailure { return Result.retry() }
+                ImportManager.persistScanPageOffsets(settings, result.nextPageOffsets)
+            } else if (result.contents.isEmpty() && result.failures.isEmpty()) {
+                ImportManager.persistScanPageOffsets(settings, result.nextPageOffsets)
             }
 
             settings.importer.lastRunAt.set(System.currentTimeMillis())

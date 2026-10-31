@@ -1,6 +1,9 @@
 package com.lagradost.cloudstream3.importsystem
 
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.MainPageData
+import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SearchResponseList
@@ -8,6 +11,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.CompletableDeferred
@@ -43,14 +47,22 @@ class ImportEngineTest {
         var searchFailuresRemaining = 0
         var suspendForever = false
         var searchCalls = 0
+        val searchPagesRequested = mutableListOf<Int>()
         var loadCalls = 0
         var loadLinksCalls = 0
         var searchResponseByPage: Map<Int, List<SearchResponse>>? = null
         var pagesWithNext: Set<Int> = emptySet()
+        var mainPageResponseByPage: Map<Int, List<SearchResponse>>? = null
+        var catalogPagesWithNext: Set<Int> = emptySet()
+        val catalogPagesRequested = mutableListOf<Int>()
+        override val hasMainPage: Boolean get() = mainPageResponseByPage != null
+        override val mainPage: List<MainPageData>
+            get() = if (hasMainPage) listOf(MainPageData("Catalog", "catalog")) else emptyList()
         val searchStarted = CompletableDeferred<Unit>()
 
         override suspend fun search(query: String, page: Int): SearchResponseList? {
             searchCalls++
+            searchPagesRequested += page
             searchStarted.complete(Unit)
             if (suspendForever) awaitCancellation()
             if (searchFailuresRemaining > 0) {
@@ -75,7 +87,7 @@ class ImportEngineTest {
 
         override suspend fun load(url: String): LoadResponse? {
             loadCalls++
-            val title = searchResponseByPage?.values.orEmpty()
+            val title = (searchResponseByPage?.values.orEmpty() + mainPageResponseByPage?.values.orEmpty())
                 .flatten()
                 .firstOrNull { it.url == url }
                 ?.name ?: TITLE
@@ -85,6 +97,12 @@ class ImportEngineTest {
                 type = TvType.AnimeMovie,
                 dataUrl = url,
             )
+        }
+
+        override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+            catalogPagesRequested += page
+            val items = mainPageResponseByPage?.get(page).orEmpty()
+            return newHomePageResponse(request, items, hasNext = page in catalogPagesWithNext)
         }
 
         override suspend fun loadLinks(
@@ -252,6 +270,104 @@ class ImportEngineTest {
         assertEquals(listOf(NEW_TITLE), result.contents.values.map { it.title })
         assertEquals(1, provider.loadCalls)
         assertEquals(2, result.progress.duplicatesSkipped)
+    }
+
+    @Test
+    fun `a repeated limited scan resumes at the next search page`() = runBlocking {
+        val firstProvider = FakeProvider().apply {
+            searchResponseByPage = mapOf(
+                1 to listOf(searchItem(TITLE, "/anime/first")),
+                2 to listOf(searchItem(NEW_TITLE, "/anime/second")),
+            )
+            pagesWithNext = setOf(1)
+        }
+        val first = ImportEngine(
+            config = config().copy(maxItems = 1, maxPages = 1),
+            providers = listOf(firstProvider),
+        ).run()
+
+        assertEquals(listOf(1), firstProvider.searchPagesRequested)
+        assertEquals(2, first.nextPageOffsets.values.single())
+
+        val secondProvider = FakeProvider().apply {
+            searchResponseByPage = firstProvider.searchResponseByPage
+            pagesWithNext = setOf(1)
+        }
+        val second = ImportEngine(
+            config = config().copy(
+                maxItems = 1,
+                maxPages = 1,
+                pageOffsets = first.nextPageOffsets,
+            ),
+            providers = listOf(secondProvider),
+            existingProviderTitles = mapOf(
+                "FakeProvider" to setOf(TitleNormalizer.normalize(TITLE)),
+            ),
+        ).run()
+
+        assertEquals("the second run must not start again at page 1", listOf(2), secondProvider.searchPagesRequested)
+        assertEquals(listOf(NEW_TITLE), second.contents.values.map { it.title })
+        assertEquals(3, second.nextPageOffsets.values.single())
+    }
+
+    @Test
+    fun `catalog provider resumes at its next main page on the next limited scan`() = runBlocking {
+        val catalogPages = mapOf(
+            1 to listOf(searchItem(TITLE, "/anime/catalog-first")),
+            2 to listOf(searchItem(NEW_TITLE, "/anime/catalog-second")),
+        )
+        val config = config().copy(searchQueries = emptyList(), maxItems = 1, maxPages = 1)
+        val firstProvider = FakeProvider().apply {
+            mainPageResponseByPage = catalogPages
+            catalogPagesWithNext = setOf(1)
+        }
+        val first = ImportEngine(config = config, providers = listOf(firstProvider)).run()
+
+        assertEquals(listOf(1), firstProvider.catalogPagesRequested)
+        assertEquals(2, first.nextPageOffsets.values.single())
+
+        val secondProvider = FakeProvider().apply {
+            mainPageResponseByPage = catalogPages
+            catalogPagesWithNext = setOf(1)
+        }
+        val second = ImportEngine(
+            config = config.copy(pageOffsets = first.nextPageOffsets),
+            providers = listOf(secondProvider),
+            existingProviderTitles = mapOf(
+                "FakeProvider" to setOf(TitleNormalizer.normalize(TITLE)),
+            ),
+        ).run()
+
+        assertEquals("catalog scan must resume at page 2", listOf(2), secondProvider.catalogPagesRequested)
+        assertEquals(listOf(NEW_TITLE), second.contents.values.map { it.title })
+    }
+
+    @Test
+    fun `a limit in the middle of a page resumes remaining candidates without losing them`() = runBlocking {
+        val pageResults = mapOf(
+            1 to listOf(
+                searchItem(TITLE, "/anime/first"),
+                searchItem(NEW_TITLE, "/anime/second"),
+            ),
+        )
+        val firstProvider = FakeProvider().apply { searchResponseByPage = pageResults }
+        val config = config().copy(maxItems = 1, maxPages = 1)
+        val first = ImportEngine(config = config, providers = listOf(firstProvider)).run()
+
+        assertEquals(1, first.nextPageOffsets.values.single())
+
+        val secondProvider = FakeProvider().apply { searchResponseByPage = pageResults }
+        val second = ImportEngine(
+            config = config.copy(pageOffsets = first.nextPageOffsets),
+            providers = listOf(secondProvider),
+            existingProviderTitles = mapOf(
+                "FakeProvider" to setOf(TitleNormalizer.normalize(TITLE)),
+            ),
+        ).run()
+
+        assertEquals(listOf(1), secondProvider.searchPagesRequested)
+        assertEquals(1, secondProvider.loadCalls)
+        assertEquals(listOf(NEW_TITLE), second.contents.values.map { it.title })
     }
 
     @Test

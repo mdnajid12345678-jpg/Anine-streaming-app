@@ -830,7 +830,7 @@
     <string name="import_added_date_clear">Clear date</string>
     <string name="import_added_date_summary">Only content added on this date is included. The provider must expose an actual addedAt timestamp; release year is not used.</string>
     <string name="import_max_items">Item limit per run</string>
-    <string name="import_max_pages">Catalog page limit</string>
+    <string name="import_max_pages">Pages per run (auto-resume)</string>
     <string name="import_search_queries">Search seeds, comma separated</string>
     <string name="import_resolve_links">Resolve playable links</string>
     <string name="import_resolve_links_summary">Calls the provider loadLinks() and extractors. Slower, and not every provider supports it.</string>

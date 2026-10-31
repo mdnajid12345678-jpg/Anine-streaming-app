@@ -13,6 +13,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 /**
  * App scoped coordinator for the import feature.
@@ -32,6 +35,8 @@ object ImportManager {
         val report: ImportReport? = null,
         val uploadMessage: String? = null,
         val jobId: String? = null,
+        /** Cursor produced by the preview; committed only once its data is safely stored. */
+        val nextPageOffsets: Map<String, Int> = emptyMap(),
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -63,6 +68,7 @@ object ImportManager {
             addedOnDate = addedOnDate,
             maxItems = prefs.maxItems.get().coerceAtLeast(1),
             maxPages = prefs.maxPages.get().coerceAtLeast(1),
+            pageOffsets = readPageOffsets(prefs.scanPageOffsets.get()),
             searchQueries = prefs.searchQueries.get()
                 .split(',')
                 .map { it.trim() }
@@ -77,8 +83,30 @@ object ImportManager {
     /** True when this build carries the public Supabase configuration. */
     fun supabaseConfigured(): Boolean = BuildConfig.SUPABASE_CONFIGURED
 
+    private fun readPageOffsets(raw: String): Map<String, Int> = runCatching {
+        Json.decodeFromString<Map<String, Int>>(raw).filterValues { it >= 1 }
+    }.getOrDefault(emptyMap())
+
+    /** Called only after content is stored, or when the completed scan had nothing to save. */
+    fun persistScanPageOffsets(settings: AppSettings, offsets: Map<String, Int>) {
+        settings.importer.scanPageOffsets.set(Json.encodeToString(offsets))
+    }
+
     fun startPreview(config: ImportConfig, settings: AppSettings) {
-        if (job?.isActive == true || ProviderLinkRefreshManager.state.value.running) return
+        if (job?.isActive == true || _state.value.uploading ||
+            ProviderLinkRefreshManager.state.value.running
+        ) return
+
+        val previous = _state.value
+        if (previous.preview.isNotEmpty() && previous.report?.uploaded != true) {
+            _state.update {
+                it.copy(
+                    uploadMessage = "Save or clear the previous preview before starting another scan, " +
+                        "so its results are not lost",
+                )
+            }
+            return
+        }
 
         val validationError = config.validate()
         if (validationError != null) {
@@ -139,6 +167,7 @@ object ImportManager {
                             reviewFlags = result.reviewFlags,
                             durationMs = nowMs() - started,
                         ),
+                        nextPageOffsets = result.nextPageOffsets,
                         uploadMessage = null,
                     )
                 }
@@ -155,6 +184,9 @@ object ImportManager {
                     result.contents.isNotEmpty()
                 ) {
                     uploadPreview(settings)
+                } else if (completed && result.contents.isEmpty() && result.failures.isEmpty()) {
+                    // No new payload exists to save; safe to remember already-known/filtered pages.
+                    persistScanPageOffsets(settings, result.nextPageOffsets)
                 }
             } catch (t: Throwable) {
                 _state.update { current ->
@@ -295,6 +327,7 @@ object ImportManager {
 
             try {
                 val result = client.upload(payload)
+                persistScanPageOffsets(settings, snapshot.nextPageOffsets)
                 settings.importer.lastRunAt.set(nowMs())
                 _state.update {
                     it.copy(

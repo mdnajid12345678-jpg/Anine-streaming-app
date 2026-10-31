@@ -47,12 +47,14 @@ class ImportEngine(
         val warnings: List<String>,
         val reviewFlags: List<String>,
         val progress: ImportProgress,
+        val nextPageOffsets: Map<String, Int>,
     )
 
     private val lock = Any()
     private val failures = mutableListOf<ImportFailure>()
     private val warnings = initialWarnings.toMutableList()
     private val merged = LinkedHashMap<String, CanonicalContent>()
+    private val nextPageOffsets = config.pageOffsets.toMutableMap()
     private val providerTitlesSeen = LinkedHashMap<String, MutableSet<String>>().apply {
         existingProviderTitles.forEach { (provider, titles) -> put(provider, titles.toMutableSet()) }
     }
@@ -139,12 +141,24 @@ class ImportEngine(
             warnings = synchronized(lock) { warnings.toList() },
             reviewFlags = review,
             progress = progress,
+            nextPageOffsets = nextPageOffsets.toMap(),
         )
     }
 
     // -----------------------------------------------------------------------------------------
     // Discovery
     // -----------------------------------------------------------------------------------------
+
+    private fun pageCursorKey(provider: MainAPI, entryPoint: String, identity: String): String {
+        // A filter change starts a fresh walk; changing maxItems/maxPages does not reset progress.
+        val filterScope = listOf(
+            config.categories.map { it.name }.sorted().joinToString(","),
+            config.yearFrom?.toString().orEmpty(),
+            config.yearTo?.toString().orEmpty(),
+            config.addedOnDate.orEmpty(),
+        ).joinToString("|")
+        return listOf(provider.name, filterScope, entryPoint, identity).joinToString("\u001f")
+    }
 
     private suspend fun scanProvider(provider: MainAPI) {
         update { it.copy(providerName = provider.name, phase = ImportPhase.DISCOVERING) }
@@ -154,7 +168,7 @@ class ImportEngine(
         var newlyAdded = 0
         val missingAddedDates = java.util.concurrent.atomic.AtomicInteger()
 
-        suspend fun processPageItems(items: List<SearchResponse>) {
+        suspend fun processPageItems(items: List<SearchResponse>): Boolean {
             val candidates = items.filter { item ->
                 if (item.url.isBlank() || !seenUrls.add(item.url)) {
                     false
@@ -168,7 +182,7 @@ class ImportEngine(
                     true
                 }
             }
-            if (candidates.isEmpty()) return
+            if (candidates.isEmpty()) return true
 
             update {
                 it.copy(
@@ -177,6 +191,7 @@ class ImportEngine(
                     itemsDiscovered = it.itemsDiscovered + candidates.size,
                 )
             }
+            val failuresBeforePage = synchronized(lock) { progress.failed }
             var index = 0
             while (index < candidates.size && newlyAdded < config.maxItems) {
                 // Never start more potential additions than the remaining quota, so concurrent
@@ -190,13 +205,20 @@ class ImportEngine(
                 )
                 index = end
             }
+            // Keep the cursor on this page if the limit left candidates waiting. Saved titles are
+            // skipped on the next run, so the remaining candidates on this same page are reached.
+            // Keep it here after a load failure too, so transient errors are retried next run.
+            val pageHadFailures = synchronized(lock) { progress.failed > failuresBeforePage }
+            return index >= candidates.size && !pageHadFailures
         }
 
         // 1. keyword seeds through the real search API
         for (query in config.searchQueries) {
             if (newlyAdded >= config.maxItems) break
-            var page = 1
-            while (page <= config.maxPages && newlyAdded < config.maxItems) {
+            val cursorKey = pageCursorKey(provider, "search", query)
+            var page = (nextPageOffsets[cursorKey] ?: 1).coerceAtLeast(1)
+            var pagesRequested = 0
+            while (pagesRequested < config.maxPages && newlyAdded < config.maxItems) {
                 coroutineContext.ensureActive()
                 val response = try {
                     retrying {
@@ -216,9 +238,19 @@ class ImportEngine(
                 }
                 if (response == null) break
                 anyEntryPointWorked = true
-                processPageItems(response.items)
-                if (!response.hasNext) break
+                pagesRequested++
+                val pageCompleted = processPageItems(response.items)
+                if (!pageCompleted) {
+                    nextPageOffsets[cursorKey] = page
+                    break
+                }
+                if (!response.hasNext) {
+                    // Catalogs can grow at the head; wrap after the known tail is fully scanned.
+                    nextPageOffsets[cursorKey] = 1
+                    break
+                }
                 page++
+                nextPageOffsets[cursorKey] = page
             }
         }
 
@@ -227,8 +259,11 @@ class ImportEngine(
             for (request in provider.mainPage) {
                 if (newlyAdded >= config.maxItems) break
                 if (request.data.isBlank()) continue
-                var page = 1
-                while (page <= config.maxPages && newlyAdded < config.maxItems) {
+                val identity = "${request.name}\u001f${request.data}\u001f${request.horizontalImages}"
+                val cursorKey = pageCursorKey(provider, "catalog", identity)
+                var page = (nextPageOffsets[cursorKey] ?: 1).coerceAtLeast(1)
+                var pagesRequested = 0
+                while (pagesRequested < config.maxPages && newlyAdded < config.maxItems) {
                     coroutineContext.ensureActive()
                     val mainPageRequest = MainPageRequest(
                         name = request.name,
@@ -253,10 +288,19 @@ class ImportEngine(
                     }
                     if (response == null) break
                     anyEntryPointWorked = true
+                    pagesRequested++
                     update { it.copy(catalogPagesScanned = it.catalogPagesScanned + 1) }
-                    processPageItems(response.items.flatMap { row -> row.list })
-                    if (!response.hasNext) break
+                    val pageCompleted = processPageItems(response.items.flatMap { row -> row.list })
+                    if (!pageCompleted) {
+                        nextPageOffsets[cursorKey] = page
+                        break
+                    }
+                    if (!response.hasNext) {
+                        nextPageOffsets[cursorKey] = 1
+                        break
+                    }
                     page++
+                    nextPageOffsets[cursorKey] = page
                 }
             }
         }

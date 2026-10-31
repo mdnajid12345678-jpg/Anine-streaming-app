@@ -70,6 +70,8 @@ data class ImportConfig(
     val maxItems: Int = 60,
     /** Hard cap on catalog pages requested per main-page request. */
     val maxPages: Int = 3,
+    /** Next page per provider/search/catalog entry point, persisted after a successful save. */
+    val pageOffsets: Map<String, Int> = emptyMap(),
     /** Optional keyword seeds, scanned through MainAPI.search() when the provider supports it. */
     val searchQueries: List<String> = emptyList(),
     /** When false only metadata is imported, loadLinks() is never called. */
