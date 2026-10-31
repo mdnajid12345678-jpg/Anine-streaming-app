@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.importsystem
 
+import com.lagradost.cloudstream3.Prerelease
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.SearchResponse
@@ -17,6 +18,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(Prerelease::class)
 class ProviderLinkRefreshEngineTest {
     private class FakeProvider : MainAPI() {
         override var name = "ProviderA"
