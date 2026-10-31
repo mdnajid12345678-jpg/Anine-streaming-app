@@ -402,7 +402,7 @@ object ImportScreen : SearchableSettings {
                         )
                         if (providers.isEmpty()) {
                             Text(
-                                text = stringResource(R.string.import_no_provider_selected),
+                                text = stringResource(R.string.import_no_provider_installed),
                                 modifier = Modifier.padding(top = 12.dp),
                             )
                         } else {
