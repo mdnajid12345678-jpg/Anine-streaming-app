@@ -85,11 +85,15 @@ class ProviderLinkRefreshEngineTest {
     @Test
     fun `series refresh keeps episode identity for the database replacement`() = runBlocking {
         val provider = FakeProvider()
-        val episode = provider.newEpisode("episode-payload", fix = false) {
-            season = 2
-            this.episode = 4
-            name = "The new link"
-        }
+        val episode = provider.newEpisode(
+            url = "episode-payload",
+            initializer = {
+                season = 2
+                episode = 4
+                name = "The new link"
+            },
+            fix = false,
+        )
         provider.loaded = provider.newTvSeriesLoadResponse(
             name = "Naruto",
             url = "https://provider.example/naruto",
