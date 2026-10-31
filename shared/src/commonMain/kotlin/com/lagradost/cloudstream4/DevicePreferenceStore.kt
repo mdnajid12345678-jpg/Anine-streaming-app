@@ -48,6 +48,8 @@ class ImportPreferences(preferences: PreferenceStore) {
     /** Raw year text; empty means "no bound". Validated by ImportConfig.validate(). */
     val yearFrom = preferences.getString("import_year_from", "")
     val yearTo = preferences.getString("import_year_to", "")
+    /** Provider catalog addition date in ISO yyyy-MM-dd form; empty means no date filter. */
+    val addedOnDate = preferences.getString("import_added_on_date", "")
     val maxItems = preferences.getInt("import_max_items", 60)
     val maxPages = preferences.getInt("import_max_pages", 3)
     /** When false the engine never calls loadLinks(). */

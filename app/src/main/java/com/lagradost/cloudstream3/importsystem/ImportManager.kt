@@ -3,6 +3,7 @@ package com.lagradost.cloudstream3.importsystem
 import com.lagradost.cloudstream3.BuildConfig
 import com.lagradost.cloudstream4.AppSettings
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -52,12 +53,14 @@ object ImportManager {
 
         val from = prefs.yearFrom.get().trim().toIntOrNull()
         val to = prefs.yearTo.get().trim().toIntOrNull()
+        val addedOnDate = prefs.addedOnDate.get().trim().takeIf { it.isNotEmpty() }
 
         val config = ImportConfig(
             providerNames = prefs.providers.get(),
             categories = categories,
             yearFrom = from,
             yearTo = to,
+            addedOnDate = addedOnDate,
             maxItems = prefs.maxItems.get().coerceAtLeast(1),
             maxPages = prefs.maxPages.get().coerceAtLeast(1),
             searchQueries = prefs.searchQueries.get()
@@ -96,16 +99,44 @@ object ImportManager {
         _state.update {
             State(
                 running = true,
-                progress = ImportProgress(phase = ImportPhase.DISCOVERING, startedAt = nowMs()),
+                progress = ImportProgress(
+                    phase = ImportPhase.DISCOVERING,
+                    startedAt = nowMs(),
+                    message = "Checking previously imported titles",
+                ),
             )
         }
 
         job = scope.launch {
             val started = nowMs()
             try {
+                val callerKey = settings.importer.edgeFunctionKey.get().trim()
+                val initialWarnings = mutableListOf<String>()
+                val existingTitles = if (BuildConfig.SUPABASE_CONFIGURED && callerKey.isNotEmpty()) {
+                    try {
+                        SupabaseImportClient(
+                            functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
+                            publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
+                            callerKey = callerKey,
+                        ).existingProviderTitles(config.providerNames)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        initialWarnings += "Could not check previously imported titles; this scan " +
+                            "may include items already saved: ${t.message ?: "lookup failed"}"
+                        emptyMap()
+                    }
+                } else {
+                    initialWarnings += "Previously imported titles could not be checked because " +
+                        "the Supabase URL/publishable key or Edge Function caller key is missing"
+                    emptyMap()
+                }
+
                 val engine = ImportEngine(
                     config = config,
                     providers = providers,
+                    existingProviderTitles = existingTitles,
+                    initialWarnings = initialWarnings,
                     emit = { progress -> _state.update { it.copy(progress = progress) } },
                 )
                 val result = withContext(Dispatchers.IO) { engine.run() }
@@ -226,6 +257,7 @@ object ImportManager {
                         put("max_pages", config.maxPages.toString())
                         put("year_from", config.yearFrom?.toString() ?: "")
                         put("year_to", config.yearTo?.toString() ?: "")
+                        put("added_on_date", config.addedOnDate.orEmpty())
                         put("resolve_links", config.resolveLinks.toString())
                         put("source", "android_native_import")
                     },
@@ -343,4 +375,3 @@ object ImportManager {
 
     private fun nowMs(): Long = System.currentTimeMillis()
 }
-

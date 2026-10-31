@@ -1402,6 +1402,11 @@ fun MainAPI.updateUrl(url: String): String {
     }
 }
 
+/** Optional provider-supplied catalog-added timestamp, in epoch milliseconds. */
+interface ProviderAddedAt {
+    val addedAt: Long?
+}
+
 /** Abstract interface of SearchResponse. */
 interface SearchResponse {
     val name: String
@@ -1571,7 +1576,9 @@ constructor(
     override var quality: SearchQuality? = null,
     override var posterHeaders: Map<String, String>? = null,
     override var score: Score? = null,
-) : SearchResponse
+) : SearchResponse, ProviderAddedAt {
+    override var addedAt: Long? = null
+}
 
 fun AnimeSearchResponse.addDubStatus(status: DubStatus, episodes: Int? = null) {
     this.dubStatus = dubStatus?.also { it.add(status) } ?: mutableSetOf(status)
@@ -1631,7 +1638,8 @@ constructor(
     override var quality: SearchQuality? = null,
     override var posterHeaders: Map<String, String>? = null,
     override var score: Score? = null,
-) : SearchResponse {
+) : SearchResponse, ProviderAddedAt {
+    override var addedAt: Long? = null
     @Suppress("DEPRECATION_ERROR")
     @Deprecated(
         "Use newTorrentSearchResponse",
@@ -1666,7 +1674,8 @@ constructor(
     override var quality: SearchQuality? = null,
     override var posterHeaders: Map<String, String>? = null,
     override var score: Score? = null,
-) : SearchResponse {
+) : SearchResponse, ProviderAddedAt {
+    override var addedAt: Long? = null
     @Suppress("DEPRECATION_ERROR")
     @Deprecated(
         "Use newMovieSearchResponse",
@@ -1702,7 +1711,8 @@ constructor(
     override var posterHeaders: Map<String, String>? = null,
     var lang: String? = null,
     override var score: Score? = null,
-) : SearchResponse {
+) : SearchResponse, ProviderAddedAt {
+    override var addedAt: Long? = null
     @Suppress("DEPRECATION_ERROR")
     @Deprecated(
         "Use newLiveSearchResponse",
@@ -1739,7 +1749,8 @@ constructor(
     override var quality: SearchQuality? = null,
     override var posterHeaders: Map<String, String>? = null,
     override var score: Score? = null,
-) : SearchResponse {
+) : SearchResponse, ProviderAddedAt {
+    override var addedAt: Long? = null
     @Suppress("DEPRECATION_ERROR")
     @Deprecated(
         "Use newTvSeriesSearchResponse",

@@ -19,6 +19,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_CONTENTS = 500;
 const MAX_PROVIDERS = 100;
+const MAX_EXISTING_TITLE_ROWS = 50_000;
 const MAX_ITEM_ERRORS = 500;
 const MAX_SOURCES_PER_EPISODE = 50;
 const CONTENT_TYPES = new Set([
@@ -211,6 +212,72 @@ function mapContent(c: Record<string, unknown>): Record<string, unknown> | null 
   });
 }
 
+/** Reuse an existing canonical key when a provider omits a year or reports a compatible one. */
+async function reconcileCanonicalKeys(
+  admin: ReturnType<typeof createClient>,
+  contents: Record<string, unknown>[],
+): Promise<void> {
+  const titles = [...new Set(contents
+    .map((content) => str(content.normalized_title))
+    .filter((title): title is string => !!title))];
+  const existingByTitle = new Map<string, Array<{
+    canonical_key: string;
+    content_type: string;
+    release_year: number | null;
+  }>>();
+
+  for (let titleIndex = 0; titleIndex < titles.length; titleIndex += 100) {
+    const titleBatch = titles.slice(titleIndex, titleIndex + 100);
+    let offset = 0;
+    while (true) {
+      const pageSize = 1_000;
+      const { data, error } = await admin
+        .from("media_contents")
+        .select("canonical_key, normalized_title, content_type, release_year")
+        .in("normalized_title", titleBatch)
+        .range(offset, offset + pageSize - 1);
+      if (error) throw new Error(`canonical title reconciliation failed: ${error.message}`);
+
+      for (const row of data ?? []) {
+        if (typeof row.canonical_key !== "string" || typeof row.normalized_title !== "string" ||
+          typeof row.content_type !== "string") continue;
+        const records = existingByTitle.get(row.normalized_title) ?? [];
+        records.push({
+          canonical_key: row.canonical_key,
+          content_type: row.content_type,
+          release_year: typeof row.release_year === "number" ? row.release_year : null,
+        });
+        existingByTitle.set(row.normalized_title, records);
+      }
+
+      const count = data?.length ?? 0;
+      offset += count;
+      if (count < pageSize) break;
+      if (offset >= MAX_EXISTING_TITLE_ROWS) {
+        throw new Error("too many matching canonical titles to reconcile safely");
+      }
+    }
+  }
+
+  for (const content of contents) {
+    const title = str(content.normalized_title);
+    const contentType = str(content.content_type);
+    if (!title || !contentType) continue;
+    const incomingYear = typeof content.release_year === "number" ? content.release_year : null;
+    const compatible = (existingByTitle.get(title) ?? []).filter((existing) =>
+      existing.content_type === contentType &&
+      (incomingYear === null || existing.release_year === null || existing.release_year === incomingYear)
+    );
+    const exact = compatible.filter((existing) => existing.release_year === incomingYear);
+    const match = exact.length === 1
+      ? exact[0]
+      : exact.length === 0 && compatible.length === 1
+      ? compatible[0]
+      : undefined;
+    if (match) content.canonical_key = match.canonical_key;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return json(204, {});
   if (req.method !== "POST") {
@@ -243,6 +310,65 @@ Deno.serve(async (req) => {
     return json(400, { error: "body must be valid JSON" });
   }
 
+  if (body.action === "existing_provider_titles") {
+    const providerIds = Array.isArray(body.providerIds)
+      ? [...new Set((body.providerIds as unknown[])
+        .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        .map((id) => id.trim()))]
+      : [];
+    if (providerIds.length === 0 || providerIds.length > MAX_PROVIDERS ||
+      providerIds.some((id) => id.length > 200)) {
+      return json(400, { error: `providerIds must contain 1-${MAX_PROVIDERS} valid provider names` });
+    }
+
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    if (!serviceRoleKey || !supabaseUrl) {
+      return json(503, { error: "server side Supabase secrets are not configured for this project" });
+    }
+
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const titlesByProvider: Record<string, Set<string>> = {};
+    let offset = 0;
+    while (true) {
+      const pageSize = 1_000;
+      const { data, error } = await admin
+        .from("provider_contents")
+        .select("provider_id, media_contents!inner(normalized_title)")
+        .in("provider_id", providerIds)
+        .range(offset, offset + pageSize - 1);
+      if (error) {
+        console.error("existing_provider_titles lookup failed:", error.code ?? "unknown");
+        return json(422, { error: "database rejected the existing-title lookup" });
+      }
+
+      for (const row of data ?? []) {
+        const relation = row.media_contents as unknown;
+        const content = Array.isArray(relation) ? relation[0] : relation;
+        const normalizedTitle = content && typeof content === "object"
+          ? str((content as Record<string, unknown>).normalized_title)
+          : undefined;
+        if (!normalizedTitle || typeof row.provider_id !== "string") continue;
+        (titlesByProvider[row.provider_id] ??= new Set()).add(normalizedTitle);
+      }
+
+      const count = data?.length ?? 0;
+      offset += count;
+      if (count < pageSize) break;
+      if (offset >= MAX_EXISTING_TITLE_ROWS) {
+        return json(413, { error: "too many existing titles for one lookup; narrow the provider selection" });
+      }
+    }
+
+    return json(200, {
+      existingProviderTitles: Object.fromEntries(
+        Object.entries(titlesByProvider).map(([provider, titles]) => [provider, [...titles]]),
+      ),
+    });
+  }
+
   const job = body.job as Record<string, unknown> | undefined;
   const jobId = str(job?.id ?? job?.jobId);
   if (!job || !jobId || !/^[0-9a-fA-F-]{36}$/.test(jobId)) {
@@ -266,6 +392,17 @@ Deno.serve(async (req) => {
     return json(400, { error: `too many item errors, limit is ${MAX_ITEM_ERRORS}` });
   }
 
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!serviceRoleKey || !supabaseUrl) {
+    return json(503, {
+      error: "server side Supabase secrets are not configured for this project",
+    });
+  }
+  const admin = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
   const providers = (rawProviders as Record<string, unknown>[])
     .map((p) => stripUndefined({
       provider_id: str(p.providerId),
@@ -278,6 +415,12 @@ Deno.serve(async (req) => {
   const contents = (rawContents as Record<string, unknown>[])
     .map(mapContent)
     .filter((c): c is Record<string, unknown> => c !== null);
+  try {
+    await reconcileCanonicalKeys(admin, contents);
+  } catch (t) {
+    console.error("canonical title reconciliation failed:", t instanceof Error ? t.message : "unknown");
+    return json(422, { error: "could not reconcile incoming titles against existing canonical records" });
+  }
 
   const jobStatus = str(job.status);
   const itemErrors = (rawErrors as Record<string, unknown>[])
@@ -301,7 +444,7 @@ Deno.serve(async (req) => {
       reason: str(d.reason) ?? "ambiguous_title",
       detected_at: iso(d.detectedAt),
     }))
-    .filter((d) => d.title.length > 0);
+    .filter((d) => typeof d.title === "string" && d.title.length > 0);
 
   const payload = {
     job: stripUndefined({
@@ -321,18 +464,6 @@ Deno.serve(async (req) => {
     item_errors: itemErrors,
     duplicate_candidates: duplicateCandidates,
   };
-
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  if (!serviceRoleKey || !supabaseUrl) {
-    return json(503, {
-      error: "server side Supabase secrets are not configured for this project",
-    });
-  }
-
-  const admin = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
 
   const { data, error } = await admin.rpc("import_sync_upsert", { payload });
 

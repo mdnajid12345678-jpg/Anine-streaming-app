@@ -42,6 +42,56 @@ class SupabaseImportClient(
         else -> Configuration(true, null)
     }
 
+    /** Reads previously stored normalized titles for these providers before starting a scan. */
+    suspend fun existingProviderTitles(providerIds: Set<String>): Map<String, Set<String>> {
+        val config = configuration()
+        if (!config.configured) {
+            throw ImportUploadException(config.reason ?: "Supabase is not configured")
+        }
+        if (callerKey.isBlank()) {
+            throw ImportUploadException("Import Edge Function caller key is not configured")
+        }
+        if (providerIds.isEmpty()) return emptyMap()
+
+        val body = ExistingProviderTitlesRequest(
+            action = "existing_provider_titles",
+            providerIds = providerIds.sorted(),
+        )
+            .toJson()
+            .toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
+        var lastError: String? = null
+        repeat(MAX_ATTEMPTS) { attempt ->
+            try {
+                val response = app.post(
+                    functionUrl,
+                    headers = requestHeaders(),
+                    requestBody = body,
+                )
+                val text = response.text
+                if (response.code !in 200..299) {
+                    lastError = "Function responded with HTTP ${response.code}: ${snippet(text)}"
+                    if (response.code in 400..499 && response.code != 429) {
+                        throw ImportUploadException(lastError!!)
+                    }
+                } else {
+                    val parsed = tryParseJson<ExistingProviderTitles>(text)
+                        ?: throw ImportUploadException(
+                            "Function returned an existing-title response that could not be parsed: ${snippet(text)}",
+                        )
+                    return parsed.existingProviderTitles.mapValues { (_, titles) -> titles.toSet() }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ImportUploadException) {
+                throw e
+            } catch (t: Throwable) {
+                lastError = t.message?.take(300) ?: t::class.simpleName
+            }
+            if (attempt < MAX_ATTEMPTS - 1) delay(RETRY_DELAY_MS * (attempt + 1))
+        }
+        throw ImportUploadException(lastError ?: "Existing-title lookup failed without a reason")
+    }
+
     /**
      * Uploads one finished preview. Throws with an accurate message when the function is not
      * configured, rejects the caller, or the network fails; it never fabricates success.
@@ -60,14 +110,7 @@ class SupabaseImportClient(
             try {
                 val response = app.post(
                     functionUrl,
-                    headers = mapOf(
-                        "content-type" to "application/json",
-                        "apikey" to publishableKey,
-                        // Public bearer; the function validates it and its own caller key.
-                        "authorization" to "Bearer $publishableKey",
-                        "x-import-caller-key" to callerKey,
-                        "x-client" to "cloudstream-native-import",
-                    ),
+                    headers = requestHeaders(),
                     requestBody = body,
                 )
 
@@ -102,6 +145,15 @@ class SupabaseImportClient(
         if (text.isNullOrBlank()) return "no body"
         return text.replace(Regex("""\s+"""), " ").take(300)
     }
+
+    private fun requestHeaders() = mapOf(
+        "content-type" to "application/json",
+        "apikey" to publishableKey,
+        // Public bearer; the function validates it and its own caller key.
+        "authorization" to "Bearer $publishableKey",
+        "x-import-caller-key" to callerKey,
+        "x-client" to "cloudstream-native-import",
+    )
 
     companion object {
         private const val MAX_ATTEMPTS = 3

@@ -3,13 +3,12 @@ package com.lagradost.cloudstream3.importsystem
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.AnimeLoadResponse
 import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MovieLoadResponse
+import com.lagradost.cloudstream3.ProviderAddedAt
 import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SearchResponseList
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.isEpisodeBased
@@ -36,6 +35,8 @@ import kotlin.coroutines.coroutineContext
 class ImportEngine(
     private val config: ImportConfig,
     private val providers: List<MainAPI>,
+    existingProviderTitles: Map<String, Set<String>> = emptyMap(),
+    initialWarnings: List<String> = emptyList(),
     private val emit: (ImportProgress) -> Unit = {},
     private val now: () -> Long = { System.currentTimeMillis() },
 ) {
@@ -50,8 +51,11 @@ class ImportEngine(
 
     private val lock = Any()
     private val failures = mutableListOf<ImportFailure>()
-    private val warnings = mutableListOf<String>()
+    private val warnings = initialWarnings.toMutableList()
     private val merged = LinkedHashMap<String, CanonicalContent>()
+    private val providerTitlesSeen = LinkedHashMap<String, MutableSet<String>>().apply {
+        existingProviderTitles.forEach { (provider, titles) -> put(provider, titles.toMutableSet()) }
+    }
 
     private var progress = ImportProgress(
         phase = ImportPhase.DISCOVERING,
@@ -145,14 +149,54 @@ class ImportEngine(
     private suspend fun scanProvider(provider: MainAPI) {
         update { it.copy(providerName = provider.name, phase = ImportPhase.DISCOVERING) }
 
-        val candidates = LinkedHashMap<String, SearchResponse>()
+        val seenUrls = LinkedHashSet<String>()
         var anyEntryPointWorked = false
+        var newlyAdded = 0
+        val missingAddedDates = java.util.concurrent.atomic.AtomicInteger()
+
+        suspend fun processPageItems(items: List<SearchResponse>) {
+            val candidates = items.filter { item ->
+                if (item.url.isBlank() || !seenUrls.add(item.url)) {
+                    false
+                } else if (!config.categoryAllows(item.type)) {
+                    update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
+                    false
+                } else if (isKnownProviderTitle(provider.name, item.name)) {
+                    update { it.copy(duplicatesSkipped = it.duplicatesSkipped + 1) }
+                    false
+                } else {
+                    true
+                }
+            }
+            if (candidates.isEmpty()) return
+
+            update {
+                it.copy(
+                    phase = ImportPhase.LOADING,
+                    message = "Loading new titles from ${provider.name}",
+                    itemsDiscovered = it.itemsDiscovered + candidates.size,
+                )
+            }
+            var index = 0
+            while (index < candidates.size && newlyAdded < config.maxItems) {
+                // Never start more potential additions than the remaining quota, so concurrent
+                // loads cannot exceed the configured per-provider limit.
+                val batchSize = minOf(config.concurrency, config.maxItems - newlyAdded)
+                val end = minOf(index + batchSize, candidates.size)
+                newlyAdded += processCandidates(
+                    provider,
+                    candidates.subList(index, end),
+                    missingAddedDates,
+                )
+                index = end
+            }
+        }
 
         // 1. keyword seeds through the real search API
         for (query in config.searchQueries) {
-            if (candidates.size >= config.maxItems) break
+            if (newlyAdded >= config.maxItems) break
             var page = 1
-            while (page <= config.maxPages && candidates.size < config.maxItems) {
+            while (page <= config.maxPages && newlyAdded < config.maxItems) {
                 coroutineContext.ensureActive()
                 val response = try {
                     retrying {
@@ -172,19 +216,19 @@ class ImportEngine(
                 }
                 if (response == null) break
                 anyEntryPointWorked = true
-                addResponses(provider, response, candidates)
+                processPageItems(response.items)
                 if (!response.hasNext) break
                 page++
             }
         }
 
         // 2. catalog pages through the real homepage API
-        if (provider.hasMainPage && candidates.size < config.maxItems) {
+        if (provider.hasMainPage && newlyAdded < config.maxItems) {
             for (request in provider.mainPage) {
-                if (candidates.size >= config.maxItems) break
+                if (newlyAdded >= config.maxItems) break
                 if (request.data.isBlank()) continue
                 var page = 1
-                while (page <= config.maxPages && candidates.size < config.maxItems) {
+                while (page <= config.maxPages && newlyAdded < config.maxItems) {
                     coroutineContext.ensureActive()
                     val mainPageRequest = MainPageRequest(
                         name = request.name,
@@ -209,14 +253,15 @@ class ImportEngine(
                     }
                     if (response == null) break
                     anyEntryPointWorked = true
-                    addHomeResponse(provider, response, candidates)
+                    update { it.copy(catalogPagesScanned = it.catalogPagesScanned + 1) }
+                    processPageItems(response.items.flatMap { row -> row.list })
                     if (!response.hasNext) break
                     page++
                 }
             }
         }
 
-        if (!anyEntryPointWorked && candidates.isEmpty()) {
+        if (!anyEntryPointWorked) {
             fail(
                 provider.name,
                 FailureStage.PROVIDER,
@@ -227,57 +272,14 @@ class ImportEngine(
             return
         }
 
-        if (candidates.isEmpty()) {
-            warn("${provider.name}: catalog returned no items for the selected filters")
-            return
+        if (newlyAdded == 0) {
+            warn("${provider.name}: no new titles matched the selected filters; previously saved titles were skipped")
         }
-
-        update {
-            it.copy(
-                phase = ImportPhase.LOADING,
-                itemsDiscovered = it.itemsDiscovered + candidates.size,
-                message = "Loading ${candidates.size} detail pages from ${provider.name}",
+        if (missingAddedDates.get() > 0) {
+            warn(
+                "${provider.name}: skipped ${missingAddedDates.get()} item(s) because the provider " +
+                    "did not expose an added date; exact-date scanning requires addedAt metadata",
             )
-        }
-
-        processCandidates(provider, candidates.values.toList())
-    }
-
-    private fun addResponses(
-        provider: MainAPI,
-        response: SearchResponseList,
-        into: MutableMap<String, SearchResponse>,
-    ) {
-        var added = 0
-        for (item in response.items) {
-            if (item.url.isBlank()) continue
-            if (into.containsKey(item.url)) continue
-            if (!config.categoryAllows(item.type)) {
-                update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
-                continue
-            }
-            into[item.url] = item
-            added++
-        }
-        if (added > 0) update { it.copy(itemsDiscovered = it.itemsDiscovered + added) }
-    }
-
-    private fun addHomeResponse(
-        provider: MainAPI,
-        response: HomePageResponse,
-        into: MutableMap<String, SearchResponse>,
-    ) {
-        update { it.copy(catalogPagesScanned = it.catalogPagesScanned + 1) }
-        for (row in response.items) {
-            for (item in row.list) {
-                if (item.url.isBlank()) continue
-                if (into.containsKey(item.url)) continue
-                if (!config.categoryAllows(item.type)) {
-                    update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
-                    continue
-                }
-                into[item.url] = item
-            }
         }
     }
 
@@ -285,25 +287,42 @@ class ImportEngine(
     // Metadata
     // -----------------------------------------------------------------------------------------
 
-    private suspend fun processCandidates(provider: MainAPI, candidates: List<SearchResponse>) {
-        val limit = minOf(config.maxItems, candidates.size)
+    private fun isKnownProviderTitle(providerName: String, title: String): Boolean {
+        val normalized = TitleNormalizer.normalize(title)
+        if (normalized.isEmpty()) return false
+        return synchronized(lock) { normalized in providerTitlesSeen[providerName].orEmpty() }
+    }
+
+    private suspend fun processCandidates(
+        provider: MainAPI,
+        candidates: List<SearchResponse>,
+        missingAddedDates: java.util.concurrent.atomic.AtomicInteger,
+    ): Int {
         val semaphore = Semaphore(config.concurrency)
+        val newlyAdded = java.util.concurrent.atomic.AtomicInteger()
 
         kotlinx.coroutines.coroutineScope {
             // Bounded concurrency: at most config.concurrency detail pages are in flight, and
             // the whole block is a child of the caller so cancellation stops it immediately.
-            candidates.take(limit).forEach { candidate ->
+            candidates.forEach { candidate ->
                 launch {
                     semaphore.withPermit {
                         coroutineContext.ensureActive()
-                        processOne(provider, candidate)
+                        if (processOne(provider, candidate, missingAddedDates)) {
+                            newlyAdded.incrementAndGet()
+                        }
                     }
                 }
             }
         }
+        return newlyAdded.get()
     }
 
-    private suspend fun processOne(provider: MainAPI, candidate: SearchResponse) {
+    private suspend fun processOne(
+        provider: MainAPI,
+        candidate: SearchResponse,
+        missingAddedDates: java.util.concurrent.atomic.AtomicInteger,
+    ): Boolean {
         update { it.copy(currentItem = candidate.name) }
 
         val loaded: LoadResponse = try {
@@ -317,7 +336,7 @@ class ImportEngine(
                     candidate.url,
                     "load() returned null for \"${candidate.name}\"",
                 )
-                return
+                return false
             }
         } catch (e: CancellationException) {
             throw e
@@ -328,48 +347,74 @@ class ImportEngine(
                 candidate.url,
                 "load(\"${candidate.url}\") failed: ${describe(t)}",
             )
-            return
+            return false
         }
 
         if (!config.categoryAllows(loaded.type)) {
             update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
-            return
+            return false
         }
         if (!config.yearMatches(loaded.year)) {
             update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
-            return
+            return false
+        }
+
+        val providerAddedAt = (candidate as? ProviderAddedAt)?.addedAt
+        if (!config.addedDateMatches(providerAddedAt)) {
+            if (providerAddedAt == null) missingAddedDates.incrementAndGet()
+            update { it.copy(itemsFilteredOut = it.itemsFilteredOut + 1) }
+            return false
         }
 
         val nowMs = now()
-        val content = buildContent(provider, loaded, candidate, nowMs)
+        val content = buildContent(provider, loaded, candidate, providerAddedAt, nowMs)
         val key = content.canonicalKey
 
-        synchronized(lock) {
-            val existing = merged[key]
-            if (existing == null) {
-                merged[key] = content
-                update { it.copy(itemsLoaded = it.itemsLoaded + 1) }
+        val (accepted, targetKey) = synchronized(lock) {
+            val seenTitles = providerTitlesSeen.getOrPut(provider.name) { linkedSetOf() }
+            if (!seenTitles.add(content.normalizedTitle)) {
+                false to key
             } else {
-                val outcome = ContentMerger.merge(existing, content)
-                merged[key] = outcome.content
-                update {
-                    it.copy(
-                        itemsLoaded = it.itemsLoaded + 1,
-                        duplicatesSkipped = it.duplicatesSkipped + 1,
-                    )
+                val matching = merged.entries.firstOrNull { (_, existing) ->
+                    existing.contentType == content.contentType &&
+                        existing.normalizedTitle == content.normalizedTitle &&
+                        TitleNormalizer.canMerge(
+                            existing.title,
+                            existing.releaseYear,
+                            content.title,
+                            content.releaseYear,
+                        )
                 }
+                val mergeKey = matching?.key ?: key
+                val existing = matching?.value ?: merged[mergeKey]
+                val incoming = if (existing != null && content.canonicalKey != mergeKey) {
+                    content.copy(canonicalKey = mergeKey)
+                } else {
+                    content
+                }
+                merged[mergeKey] = if (existing == null) incoming else ContentMerger.merge(existing, incoming).content
+                true to mergeKey
             }
         }
+        update {
+            it.copy(
+                itemsLoaded = it.itemsLoaded + 1,
+                duplicatesSkipped = it.duplicatesSkipped + if (accepted) 0 else 1,
+            )
+        }
+        if (!accepted) return false
 
         if (config.resolveLinks) {
-            resolveLinks(provider, loaded, key)
+            resolveLinks(provider, loaded, targetKey)
         }
+        return true
     }
 
     private fun buildContent(
         provider: MainAPI,
         loaded: LoadResponse,
         candidate: SearchResponse,
+        providerAddedAt: Long?,
         nowMs: Long,
     ): CanonicalContent {
         val episodic = isEpisodic(loaded)
@@ -392,6 +437,7 @@ class ImportEngine(
                 providerMetadata = buildMap {
                     put("api_name", loaded.apiName)
                     put("poster_url", loaded.posterUrl ?: "")
+                    providerAddedAt?.let { put("added_at", it.toString()) }
                     if (loaded.plot != null) put("has_description", "true")
                 },
             ),

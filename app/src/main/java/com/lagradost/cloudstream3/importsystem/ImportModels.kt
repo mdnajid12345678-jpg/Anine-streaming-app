@@ -64,7 +64,9 @@ data class ImportConfig(
     /** Inclusive release-year window, null means "any". */
     val yearFrom: Int? = null,
     val yearTo: Int? = null,
-    /** Hard cap on discovered detail pages per provider+category page source. */
+    /** Exact provider catalog-addition date (yyyy-MM-dd), null means no date filter. */
+    val addedOnDate: String? = null,
+    /** Hard cap on new, unique titles added for each selected provider in a run. */
     val maxItems: Int = 60,
     /** Hard cap on catalog pages requested per main-page request. */
     val maxPages: Int = 3,
@@ -92,6 +94,9 @@ data class ImportConfig(
         if (from != null && to != null && from > to) {
             return "Start year ($from) must be lower than or equal to end year ($to)"
         }
+        if (addedOnDate != null && !ImportDate.isValid(addedOnDate)) {
+            return "Added date must be a valid date in yyyy-MM-dd format"
+        }
         listOfNotNull(from, to).forEach { year ->
             if (year < 1900 || year > 2100) return "Year $year is outside 1900-2100"
         }
@@ -114,6 +119,9 @@ data class ImportConfig(
         if (to != null && year > to) return false
         return true
     }
+
+    fun addedDateMatches(timestampMs: Long?): Boolean =
+        addedOnDate == null || ImportDate.matches(timestampMs, addedOnDate)
 
     fun categoryAllows(type: TvType?): Boolean {
         // Unknown types are only imported when the user explicitly asked for "Other".
@@ -305,4 +313,15 @@ data class ImportUploadResult(
     val upsertedSources: Int = 0,
     val duplicateCandidates: Int = 0,
     val errors: List<String> = emptyList(),
+)
+
+@Serializable
+data class ExistingProviderTitles(
+    val existingProviderTitles: Map<String, List<String>> = emptyMap(),
+)
+
+@Serializable
+data class ExistingProviderTitlesRequest(
+    val action: String,
+    val providerIds: List<String>,
 )

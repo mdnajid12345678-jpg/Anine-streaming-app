@@ -8,6 +8,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
+import java.time.ZoneId
 
 /** Scan configuration validation and filtering rules. */
 class ImportConfigTest {
@@ -17,6 +19,7 @@ class ImportConfigTest {
         categories: Set<ImportCategory> = setOf(ImportCategory.ANIME),
         yearFrom: Int? = null,
         yearTo: Int? = null,
+        addedOnDate: String? = null,
         maxItems: Int = 60,
         maxPages: Int = 3,
         maxEpisodes: Int = 12,
@@ -26,6 +29,7 @@ class ImportConfigTest {
         categories = categories,
         yearFrom = yearFrom,
         yearTo = yearTo,
+        addedOnDate = addedOnDate,
         maxItems = maxItems,
         maxPages = maxPages,
         maxEpisodesPerSeries = maxEpisodes,
@@ -61,6 +65,27 @@ class ImportConfigTest {
     fun `one sided year bounds are allowed`() {
         assertNull(config(yearFrom = 2025).validate())
         assertNull(config(yearTo = 2026).validate())
+    }
+
+    @Test
+    fun `selected added date must be a valid ISO local date`() {
+        assertNull(config(addedOnDate = "2026-10-31").validate())
+        assertNotNull(config(addedOnDate = "2026-02-31").validate())
+        assertNotNull(config(addedOnDate = "31-10-2026").validate())
+    }
+
+    @Test
+    fun `selected added date matches provider timestamp local calendar day only`() {
+        val day = LocalDate.of(2026, 10, 31)
+        val zone = ZoneId.systemDefault()
+        val inDay = day.atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
+        val nextDay = day.plusDays(1).atTime(0, 0).atZone(zone).toInstant().toEpochMilli()
+        val filtered = config(addedOnDate = day.toString())
+
+        assertTrue(filtered.addedDateMatches(inDay))
+        assertFalse(filtered.addedDateMatches(nextDay))
+        assertFalse(filtered.addedDateMatches(null))
+        assertTrue(config().addedDateMatches(null))
     }
 
     @Test

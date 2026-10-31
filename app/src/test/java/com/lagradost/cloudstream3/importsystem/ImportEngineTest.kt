@@ -2,6 +2,7 @@ package com.lagradost.cloudstream3.importsystem
 
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SearchResponseList
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
@@ -19,6 +20,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
+import java.time.ZoneId
 
 /**
  * The engine must only report what actually happened:
@@ -42,6 +45,8 @@ class ImportEngineTest {
         var searchCalls = 0
         var loadCalls = 0
         var loadLinksCalls = 0
+        var searchResponseByPage: Map<Int, List<SearchResponse>>? = null
+        var pagesWithNext: Set<Int> = emptySet()
         val searchStarted = CompletableDeferred<Unit>()
 
         override suspend fun search(query: String, page: Int): SearchResponseList? {
@@ -51,6 +56,9 @@ class ImportEngineTest {
             if (searchFailuresRemaining > 0) {
                 searchFailuresRemaining--
                 throw IllegalStateException("temporary upstream error")
+            }
+            searchResponseByPage?.let { pages ->
+                return newSearchResponseList(pages[page].orEmpty(), page in pagesWithNext)
             }
             return newSearchResponseList(
                 listOf(
@@ -67,8 +75,12 @@ class ImportEngineTest {
 
         override suspend fun load(url: String): LoadResponse? {
             loadCalls++
+            val title = searchResponseByPage?.values.orEmpty()
+                .flatten()
+                .firstOrNull { it.url == url }
+                ?.name ?: TITLE
             return newMovieLoadResponse(
-                name = TITLE,
+                name = title,
                 url = url,
                 type = TvType.AnimeMovie,
                 dataUrl = url,
@@ -193,7 +205,107 @@ class ImportEngineTest {
             assertEquals(0, result.progress.linksResolved)
         }
 
+    @Test
+    fun `known provider title is skipped and pagination continues until the new-item limit is met`() =
+        runBlocking {
+            val provider = FakeProvider().apply {
+                searchResponseByPage = mapOf(
+                    1 to listOf(searchItem(TITLE, "/anime/known")),
+                    2 to listOf(searchItem(NEW_TITLE, "/anime/new")),
+                )
+                pagesWithNext = setOf(1)
+            }
+            val config = config().copy(maxItems = 1, maxPages = 2)
+            val knownTitles = mapOf("FakeProvider" to setOf(TitleNormalizer.normalize(TITLE)))
+
+            val result = ImportEngine(
+                config = config,
+                providers = listOf(provider),
+                existingProviderTitles = knownTitles,
+            ).run()
+
+            assertEquals(2, provider.searchCalls)
+            assertEquals(1, provider.loadCalls)
+            assertEquals(listOf(NEW_TITLE), result.contents.values.map { it.title })
+            assertEquals(1, result.progress.duplicatesSkipped)
+        }
+
+    @Test
+    fun `same title from another provider merges provider references without removing the first`() =
+        runBlocking {
+            val first = FakeProvider().apply {
+                name = "ProviderA"
+                searchResponseByPage = mapOf(1 to listOf(searchItem(TITLE, "/a/frieren")))
+            }
+            val second = FakeProvider().apply {
+                name = "ProviderB"
+                searchResponseByPage = mapOf(1 to listOf(searchItem(TITLE, "/b/frieren")))
+            }
+
+            val result = ImportEngine(
+                config = config().copy(providerNames = setOf("ProviderA", "ProviderB")),
+                providers = listOf(first, second),
+            ).run()
+
+            assertEquals(1, result.contents.size)
+            assertEquals(
+                setOf("ProviderA", "ProviderB"),
+                result.contents.values.single().providerContents.map { it.providerId }.toSet(),
+            )
+        }
+
+    @Test
+    fun `selected added date includes only entries with an addedAt timestamp on that local day`() =
+        runBlocking {
+            val zone = ZoneId.systemDefault()
+            val selectedDate = LocalDate.of(2026, 10, 31)
+            val selectedTimestamp = selectedDate.atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
+            val previousTimestamp = selectedDate.minusDays(1).atTime(12, 0)
+                .atZone(zone).toInstant().toEpochMilli()
+            val provider = FakeProvider().apply {
+                searchResponseByPage = mapOf(
+                    1 to listOf(
+                        searchItem("Older Entry", "/anime/older", previousTimestamp),
+                        searchItem(NEW_TITLE, "/anime/today", selectedTimestamp),
+                    ),
+                )
+            }
+
+            val result = ImportEngine(
+                config = config().copy(addedOnDate = selectedDate.toString()),
+                providers = listOf(provider),
+            ).run()
+
+            assertEquals(listOf(NEW_TITLE), result.contents.values.map { it.title })
+            assertEquals(1, result.progress.itemsFilteredOut)
+        }
+
+    @Test
+    fun `selected added date skips providers without timestamp metadata and reports why`() =
+        runBlocking {
+            val provider = FakeProvider().apply {
+                searchResponseByPage = mapOf(1 to listOf(searchItem(NEW_TITLE, "/anime/unknown-date")))
+            }
+
+            val result = ImportEngine(
+                config = config().copy(addedOnDate = "2026-10-31"),
+                providers = listOf(provider),
+            ).run()
+
+            assertTrue(result.contents.isEmpty())
+            assertTrue(result.warnings.any { it.contains("did not expose an added date") })
+        }
+
+    private fun searchItem(title: String, url: String, addedAt: Long? = null): SearchResponse =
+        newMovieSearchResponse(
+            name = title,
+            url = url,
+            type = TvType.AnimeMovie,
+            fix = false,
+        ).apply { this.addedAt = addedAt }
+
     private companion object {
         const val TITLE = "Frieren: Beyond Journey's End"
+        const val NEW_TITLE = "New anime title"
     }
 }

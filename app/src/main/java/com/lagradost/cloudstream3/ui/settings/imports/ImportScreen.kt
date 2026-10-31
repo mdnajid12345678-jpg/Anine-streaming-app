@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.ui.settings.imports
 
+import android.app.DatePickerDialog
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,6 +38,9 @@ import com.lagradost.cloudstream4.rememberAppSettings
 import com.mihon.presentation.settings.Preference
 import com.mihon.presentation.settings.SearchableSettings
 import kotlinx.collections.immutable.persistentListOf
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 
 /**
  * Settings -> Import -> Import dashboard.
@@ -119,6 +123,10 @@ object ImportScreen : SearchableSettings {
                         preference = settings.importer.yearTo,
                         subtitle = "%s",
                     ),
+                    Preference.PreferenceItem.CustomPreference(
+                        title = stringResource(R.string.import_added_date_title),
+                        content = { AddedOnDateFilter(settings) },
+                    ),
                     Preference.PreferenceItem.SliderPreference(
                         title = stringResource(R.string.import_max_items),
                         icon = painterResource(R.drawable.baseline_list_alt_24),
@@ -199,6 +207,69 @@ object ImportScreen : SearchableSettings {
                 ),
             ),
         )
+    }
+
+    @Composable
+    private fun AddedOnDateFilter(settings: AppSettings) {
+        val context = LocalContext.current
+        var selectedDate by remember { mutableStateOf(settings.importer.addedOnDate.get()) }
+
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        val calendar = Calendar.getInstance()
+                        selectedDate.takeIf { it.isNotBlank() }?.let { value ->
+                            runCatching {
+                                SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                                    isLenient = false
+                                }.parse(value)
+                            }.getOrNull()?.let(calendar::setTime)
+                        }
+                        DatePickerDialog(
+                            context,
+                            { _, year, month, day ->
+                                val date = String.format(
+                                    Locale.US,
+                                    "%04d-%02d-%02d",
+                                    year,
+                                    month + 1,
+                                    day,
+                                )
+                                settings.importer.addedOnDate.set(date)
+                                selectedDate = date
+                            },
+                            calendar.get(Calendar.YEAR),
+                            calendar.get(Calendar.MONTH),
+                            calendar.get(Calendar.DAY_OF_MONTH),
+                        ).show()
+                    },
+                ) {
+                    Text(
+                        if (selectedDate.isBlank()) stringResource(R.string.import_added_date_select)
+                        else selectedDate,
+                    )
+                }
+                if (selectedDate.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            settings.importer.addedOnDate.set("")
+                            selectedDate = ""
+                        },
+                    ) {
+                        Text(stringResource(R.string.import_added_date_clear))
+                    }
+                }
+            }
+            Text(
+                text = stringResource(R.string.import_added_date_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 
     @Composable

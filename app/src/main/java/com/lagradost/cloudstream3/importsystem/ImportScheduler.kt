@@ -122,7 +122,26 @@ class ImportWorker(
         }
 
         return try {
-            val engine = ImportEngine(config = config, providers = providers)
+            val callerKey = settings.importer.edgeFunctionKey.get().trim()
+            val canCheckExistingTitles = BuildConfig.SUPABASE_CONFIGURED && callerKey.isNotEmpty()
+            val existingTitles = if (canCheckExistingTitles) {
+                val client = SupabaseImportClient(
+                    functionUrl = BuildConfig.SUPABASE_IMPORT_FUNCTION_URL,
+                    publishableKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY,
+                    callerKey = callerKey,
+                )
+                client.existingProviderTitles(config.providerNames)
+            } else {
+                emptyMap()
+            }
+            val engine = ImportEngine(
+                config = config,
+                providers = providers,
+                existingProviderTitles = existingTitles,
+                initialWarnings = if (canCheckExistingTitles) emptyList() else listOf(
+                    "Previously imported titles could not be checked for this scheduled scan",
+                ),
+            )
             val result = engine.run()
 
             if (config.uploadToSupabase && BuildConfig.SUPABASE_CONFIGURED) {
@@ -157,6 +176,9 @@ class ImportWorker(
                     "categories" to config.categories.joinToString(",") { it.name },
                     "max_items" to config.maxItems.toString(),
                     "max_pages" to config.maxPages.toString(),
+                    "year_from" to config.yearFrom?.toString().orEmpty(),
+                    "year_to" to config.yearTo?.toString().orEmpty(),
+                    "added_on_date" to config.addedOnDate.orEmpty(),
                     "source" to "android_scheduled_import",
                 ),
                 status = "completed",

@@ -765,4 +765,8 @@
         <item quantity="other">%dটি ডাউনলোড কিউতে আছে</item>
     </plurals>
     <string name="player_is_live">সরাসরি</string>
+    <string name="import_added_date_title">Provider-এ যোগ হওয়ার তারিখ</string>
+    <string name="import_added_date_select">তারিখ নির্বাচন করুন</string>
+    <string name="import_added_date_clear">তারিখ মুছুন</string>
+    <string name="import_added_date_summary">শুধু এই তারিখে provider-এ যোগ হওয়া কনটেন্ট নেওয়া হবে। provider-কে আসল addedAt timestamp দিতে হবে; release year ব্যবহার হবে না।</string>
 </resources>
