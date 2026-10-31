@@ -297,7 +297,7 @@ class ImportEngineTest {
         }
 
     private fun searchItem(title: String, url: String, addedAt: Long? = null): SearchResponse =
-        newMovieSearchResponse(
+        FakeProvider().newMovieSearchResponse(
             name = title,
             url = url,
             type = TvType.AnimeMovie,
